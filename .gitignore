@@ -3,3 +3,4 @@ scumm-game
 *.dSYM/
 player.txt
 .DS_Store
+scumm-game.app/

@@ -2,4 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 make
-./scumm-game
+if [[ ! -d scumm-game.app ]]; then
+    ./build_app.sh
+fi
+exec open -W scumm-game.app
