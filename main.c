@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define SCREEN_W 960
-#define SCREEN_H 600
+#define SCREEN_H 660
 #define VERB_BAR_H 120
 #define PLAY_H (SCREEN_H - VERB_BAR_H)
 #define ACTOR_SPEED 140.0f
@@ -59,6 +59,8 @@ static void draw_wrapped_text(const char *text, int x, int y, int max_w, int fon
 int main(void) {
     InitWindow(SCREEN_W, SCREEN_H, "scumm-game");
     SetTargetFPS(60);
+
+    Texture2D bg = LoadTexture("assets/bg-dock.png");
 
     Actor actor = {
         .pos = { SCREEN_W / 2.0f, PLAY_H - 80 },
@@ -162,11 +164,14 @@ int main(void) {
         BeginDrawing();
         ClearBackground((Color){ 20, 22, 30, 255 });
 
-        DrawRectangle(0, 0, SCREEN_W, PLAY_H - 60, (Color){ 40, 50, 80, 255 });
-        DrawRectangle(0, PLAY_H - 60, SCREEN_W, 60, (Color){ 60, 45, 35, 255 });
-        DrawRectangle(40, PLAY_H - 220, 160, 160, (Color){ 30, 35, 60, 255 });
-        DrawRectangleLines(40, PLAY_H - 220, 160, 160, (Color){ 90, 100, 140, 255 });
-        DrawText("window", 80, PLAY_H - 150, 16, (Color){ 120, 130, 170, 255 });
+        if (bg.id != 0) {
+            Rectangle src = { 0, 0, (float)bg.width, (float)bg.height };
+            Rectangle dst = { 0, 0, SCREEN_W, PLAY_H };
+            DrawTexturePro(bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
+        } else {
+            DrawRectangle(0, 0, SCREEN_W, PLAY_H, (Color){ 40, 50, 80, 255 });
+            DrawText("(missing assets/bg-dock.png)", 20, 20, 20, RED);
+        }
 
         if (lamp.visible) {
             DrawRectangle(lamp.rect.x + 10, lamp.rect.y + 60, 40, 50, (Color){ 150, 100, 40, 255 });
@@ -212,6 +217,7 @@ int main(void) {
         EndDrawing();
     }
 
+    UnloadTexture(bg);
     CloseWindow();
     return 0;
 }
