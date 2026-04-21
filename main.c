@@ -643,15 +643,6 @@ int main(void) {
     actor.pos = clamp_to_walkbox(actor.pos, &dock);
     actor.target = actor.pos;
 
-    Hotspot lamp = {
-        .rect = { 680, PLAY_H - 180, 60, 110 },
-        .name = "brass lamp",
-        .look_text = "It's a tarnished brass lamp. It looks like it could use a good polish.",
-        .use_text = "You rub the lamp. Nothing happens. You feel slightly silly.",
-        .pickup_text = "You pick up the lamp. Well, you would, if this were a longer demo.",
-        .visible = true,
-    };
-
     Verb selected_verb = VERB_LOOK;
     char message[256] = "";
     float message_timer = 0.0f;
@@ -835,9 +826,6 @@ int main(void) {
         }
 
         Hotspot *hover = NULL;
-        if (!edit_mode && lamp.visible && CheckCollisionPointRec(mouse, lamp.rect) && mouse.y < PLAY_H) {
-            hover = &lamp;
-        }
 
         if (hover) {
             snprintf(status_line, sizeof(status_line), "%s %s", verb_names[selected_verb], hover->name);
@@ -986,13 +974,6 @@ int main(void) {
         } else {
             DrawRectangle(0, 0, SCREEN_W, PLAY_H, (Color){ 40, 50, 80, 255 });
             DrawText("(missing assets/bg-dock.png)", 20, 20, 20, RED);
-        }
-
-        if (lamp.visible) {
-            DrawRectangle(lamp.rect.x + 10, lamp.rect.y + 60, 40, 50, (Color){ 150, 100, 40, 255 });
-            DrawCircle(lamp.rect.x + 30, lamp.rect.y + 40, 20, (Color){ 200, 160, 60, 255 });
-            DrawRectangle(lamp.rect.x + 25, lamp.rect.y + 20, 10, 25, (Color){ 150, 100, 40, 255 });
-            if (hover == &lamp) DrawRectangleLinesEx(lamp.rect, 2, YELLOW);
         }
 
         float s = actor_scale_at(actor.pos, &dock);

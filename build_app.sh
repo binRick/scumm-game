@@ -60,6 +60,10 @@ cat > "$APP/Contents/MacOS/scumm-game" <<'LAUNCH'
 set -e
 HERE="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$HERE"
+if [[ ! -r assets/bg-dock.png ]]; then
+    osascript -e "display dialog \"scumm-game can't read files in its own repo at:\n\n$HERE\n\nmacOS is blocking access. Grant scumm-game permission in System Settings > Privacy & Security > Files and Folders, or move the repo to ~/Projects/.\" buttons {\"OK\"} with icon caution with title \"scumm-game\"" > /dev/null 2>&1 || true
+    exit 1
+fi
 exec ./scumm-game "$@"
 LAUNCH
 chmod +x "$APP/Contents/MacOS/scumm-game"
