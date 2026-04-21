@@ -503,26 +503,21 @@ static void draw_fg_polygon(Texture2D bg, float draw_w, float draw_h, const Walk
     int tri_count = triangulate(poly, tri_idx);
     if (tri_count == 0) return;
 
-    rlSetTexture(bg.id);
-    rlBegin(RL_QUADS);
-    rlColor4ub(255, 255, 255, 255);
-
+    Rectangle src = { 0, 0, (float)bg.width, (float)bg.height };
+    Rectangle dst = { 0, 0, draw_w, draw_h };
     for (int t = 0; t < tri_count; t++) {
-        Vector2 v[3] = {
-            poly->p[tri_idx[t * 3 + 0]],
-            poly->p[tri_idx[t * 3 + 1]],
-            poly->p[tri_idx[t * 3 + 2]],
-        };
-        for (int k = 0; k < 3; k++) {
-            rlTexCoord2f(v[k].x / draw_w, v[k].y / draw_h);
-            rlVertex2f(v[k].x, v[k].y);
-        }
-        rlTexCoord2f(v[2].x / draw_w, v[2].y / draw_h);
-        rlVertex2f(v[2].x, v[2].y);
+        Vector2 a = poly->p[tri_idx[t * 3 + 0]];
+        Vector2 b = poly->p[tri_idx[t * 3 + 1]];
+        Vector2 c = poly->p[tri_idx[t * 3 + 2]];
+        float minx = fminf(a.x, fminf(b.x, c.x));
+        float maxx = fmaxf(a.x, fmaxf(b.x, c.x));
+        float miny = fminf(a.y, fminf(b.y, c.y));
+        float maxy = fmaxf(a.y, fmaxf(b.y, c.y));
+        BeginScissorMode((int)minx, (int)miny,
+                         (int)ceilf(maxx - minx), (int)ceilf(maxy - miny));
+        DrawTexturePro(bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
+        EndScissorMode();
     }
-
-    rlEnd();
-    rlSetTexture(0);
 }
 
 static void draw_fg_debug_fill(const Walkbox *poly, Color color) {
@@ -649,6 +644,7 @@ int main(void) {
     char status_line[128] = "";
     bool debug_overlay = false;
     bool edit_mode = false;
+    Camera2D edit_cam = { .target = { 0, 0 }, .offset = { 0, 0 }, .rotation = 0.0f, .zoom = 1.0f };
     bool editing_fg = false;
     int editing_fg_idx = 0;
     int dragging_vert = -1;
@@ -667,7 +663,31 @@ int main(void) {
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
-        Vector2 mouse = GetMousePosition();
+        Vector2 mouse_screen = GetMousePosition();
+        Vector2 mouse = mouse_screen;
+        if (edit_mode) {
+            float wheel = GetMouseWheelMove();
+            if (wheel != 0.0f) {
+                Vector2 before = GetScreenToWorld2D(mouse_screen, edit_cam);
+                edit_cam.zoom *= (wheel > 0) ? 1.15f : 1.0f / 1.15f;
+                if (edit_cam.zoom < 1.0f) edit_cam.zoom = 1.0f;
+                if (edit_cam.zoom > 8.0f) edit_cam.zoom = 8.0f;
+                Vector2 after = GetScreenToWorld2D(mouse_screen, edit_cam);
+                edit_cam.target.x += (before.x - after.x);
+                edit_cam.target.y += (before.y - after.y);
+            }
+            if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
+                Vector2 d = GetMouseDelta();
+                edit_cam.target.x -= d.x / edit_cam.zoom;
+                edit_cam.target.y -= d.y / edit_cam.zoom;
+            }
+            if (IsKeyPressed(KEY_Z)) {
+                edit_cam.zoom = 1.0f;
+                edit_cam.target = (Vector2){ 0, 0 };
+                edit_cam.offset = (Vector2){ 0, 0 };
+            }
+            mouse = GetScreenToWorld2D(mouse_screen, edit_cam);
+        }
 
         if (IsKeyPressed(KEY_B) && !edit_mode) {
             browser_mode = !browser_mode;
@@ -791,6 +811,9 @@ int main(void) {
         if (IsKeyPressed(KEY_E)) {
             edit_mode = !edit_mode;
             dragging_vert = -1;
+            edit_cam.zoom = 1.0f;
+            edit_cam.target = (Vector2){ 0, 0 };
+            edit_cam.offset = (Vector2){ 0, 0 };
             if (!edit_mode) {
                 bool ok_wb = (dock.n >= 3) ? save_walkbox(WALKBOX_PATH, &dock) : false;
                 bool ok_fg = save_fg_list(FG_PATH, fgs, fg_count);
@@ -842,7 +865,7 @@ int main(void) {
                                      : (active->n >= 3 && save_walkbox(WALKBOX_PATH, active));
                 if (ok) save_flash = 1.5f;
             }
-            if (mouse.y < PLAY_H) {
+            if (mouse_screen.y < PLAY_H) {
                 if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     int near_v = nearest_vertex(mouse, active, VERT_GRAB_RADIUS);
                     if (near_v >= 0) {
@@ -967,6 +990,8 @@ int main(void) {
         BeginDrawing();
         ClearBackground((Color){ 20, 22, 30, 255 });
 
+        if (edit_mode) BeginMode2D(edit_cam);
+
         if (bg.id != 0) {
             Rectangle src = { 0, 0, (float)bg.width, (float)bg.height };
             Rectangle dst = { 0, 0, SCREEN_W, PLAY_H };
@@ -1026,8 +1051,10 @@ int main(void) {
             DrawRectangle(ax + (int)(1 * s), ay + (int)(5 * s), (int)(5 * s), (int)(20 * s), (Color){ 40, 40, 90, 255 });
         }
 
-        for (int i = 0; i < fg_count; i++) {
-            draw_fg_polygon(bg, (float)SCREEN_W, (float)PLAY_H, &fgs[i]);
+        if (!edit_mode) {
+            for (int i = 0; i < fg_count; i++) {
+                draw_fg_polygon(bg, (float)SCREEN_W, (float)PLAY_H, &fgs[i]);
+            }
         }
 
         if (debug_overlay) {
@@ -1098,6 +1125,8 @@ int main(void) {
             if (msg_y < 20) msg_y = 20;
             draw_wrapped_text(message, 20, msg_y, SCREEN_W - 40, 20, WHITE);
         }
+
+        if (edit_mode) EndMode2D();
 
         DrawRectangle(0, PLAY_H, SCREEN_W, VERB_BAR_H, (Color){ 15, 15, 20, 255 });
         DrawLine(0, PLAY_H, SCREEN_W, PLAY_H, (Color){ 80, 80, 100, 255 });
