@@ -13,9 +13,9 @@ if [[ ! -f "$RAYLIB_SRC/libraylib.a" ]]; then
     (cd "$RAYLIB_SRC" && emmake make PLATFORM=PLATFORM_WEB)
 fi
 
-mkdir -p web
+mkdir -p docs
 emcc main.c \
-  -o web/index.html \
+  -o docs/index.html \
   -I "$RAYLIB_SRC" \
   "$RAYLIB_SRC/libraylib.a" \
   -Os -Wall \
