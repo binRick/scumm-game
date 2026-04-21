@@ -496,27 +496,46 @@ static int triangulate(const Walkbox *poly, int *tri_idx_out) {
     return tri_count;
 }
 
-static void draw_fg_polygon(Texture2D bg, float draw_w, float draw_h, const Walkbox *poly) {
+static void draw_fg_polygon(Texture2D bg, float draw_w, float draw_h, const Walkbox *poly, float actor_y) {
     if (poly->n < 3 || bg.id == 0) return;
 
-    int tri_idx[MAX_WB_VERTS * 3];
-    int tri_count = triangulate(poly, tri_idx);
-    if (tri_count == 0) return;
+    float miny = poly->p[0].y, maxy = poly->p[0].y;
+    for (int i = 1; i < poly->n; i++) {
+        if (poly->p[i].y < miny) miny = poly->p[i].y;
+        if (poly->p[i].y > maxy) maxy = poly->p[i].y;
+    }
+    if (actor_y > maxy) return;
+    int y_start = (int)floorf(miny);
+    int y_end   = (int)ceilf(maxy);
 
     Rectangle src = { 0, 0, (float)bg.width, (float)bg.height };
     Rectangle dst = { 0, 0, draw_w, draw_h };
-    for (int t = 0; t < tri_count; t++) {
-        Vector2 a = poly->p[tri_idx[t * 3 + 0]];
-        Vector2 b = poly->p[tri_idx[t * 3 + 1]];
-        Vector2 c = poly->p[tri_idx[t * 3 + 2]];
-        float minx = fminf(a.x, fminf(b.x, c.x));
-        float maxx = fmaxf(a.x, fmaxf(b.x, c.x));
-        float miny = fminf(a.y, fminf(b.y, c.y));
-        float maxy = fmaxf(a.y, fmaxf(b.y, c.y));
-        BeginScissorMode((int)minx, (int)miny,
-                         (int)ceilf(maxx - minx), (int)ceilf(maxy - miny));
-        DrawTexturePro(bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
-        EndScissorMode();
+
+    float xs[MAX_WB_VERTS];
+    for (int y = y_start; y <= y_end; y++) {
+        float py = (float)y + 0.5f;
+        int nx = 0;
+        for (int i = 0; i < poly->n; i++) {
+            Vector2 a = poly->p[i];
+            Vector2 b = poly->p[(i + 1) % poly->n];
+            if ((a.y > py) == (b.y > py)) continue;
+            float t = (py - a.y) / (b.y - a.y);
+            xs[nx++] = a.x + t * (b.x - a.x);
+        }
+        for (int i = 1; i < nx; i++) {
+            float key = xs[i];
+            int j = i - 1;
+            while (j >= 0 && xs[j] > key) { xs[j + 1] = xs[j]; j--; }
+            xs[j + 1] = key;
+        }
+        for (int i = 0; i + 1 < nx; i += 2) {
+            int x0 = (int)floorf(xs[i]);
+            int x1 = (int)ceilf(xs[i + 1]);
+            if (x1 <= x0) continue;
+            BeginScissorMode(x0, y, x1 - x0, 1);
+            DrawTexturePro(bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
+            EndScissorMode();
+        }
     }
 }
 
@@ -1053,7 +1072,7 @@ int main(void) {
 
         if (!edit_mode) {
             for (int i = 0; i < fg_count; i++) {
-                draw_fg_polygon(bg, (float)SCREEN_W, (float)PLAY_H, &fgs[i]);
+                draw_fg_polygon(bg, (float)SCREEN_W, (float)PLAY_H, &fgs[i], actor.pos.y);
             }
         }
 
