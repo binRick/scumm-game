@@ -22,6 +22,7 @@ emcc main.c \
   -s USE_GLFW=3 -s ASYNCIFY \
   -s TOTAL_MEMORY=67108864 \
   -s ALLOW_MEMORY_GROWTH=1 \
+  -s STACK_SIZE=1048576 \
   -s EXPORTED_RUNTIME_METHODS='["UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
   --preload-file assets \
   --preload-file sprites \
