@@ -30,5 +30,5 @@ emcc main.c \
   --preload-file walkbox.txt \
   --preload-file fg.txt \
   --preload-file sprites.txt \
-  --shell-file "$RAYLIB_SRC/minshell.html" \
+  --shell-file web_shell.html \
   -DPLATFORM_WEB

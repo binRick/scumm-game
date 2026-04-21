@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>scumm-game</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #canvas {
+    display: block;
+    width:  min(100vw, calc(100vh * 960 / 660));
+    height: min(100vh, calc(100vw * 660 / 960));
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #000;
+    outline: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" width="960" height="660" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<script>
+  var Module = {
+    canvas: document.getElementById("canvas"),
+    print:    function(t) { console.log(t); },
+    printErr: function(t) { console.warn(t); }
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
