@@ -2,7 +2,53 @@
 #include "rlgl.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+EM_JS(void, web_save_text, (const char *key, const char *content), {
+    try { localStorage.setItem(UTF8ToString(key), UTF8ToString(content)); } catch (e) {}
+});
+
+EM_JS(char *, web_load_text, (const char *key), {
+    try {
+        var v = localStorage.getItem(UTF8ToString(key));
+        if (v === null) return 0;
+        var n = lengthBytesUTF8(v) + 1;
+        var p = _malloc(n);
+        stringToUTF8(v, p, n);
+        return p;
+    } catch (e) { return 0; }
+});
+
+static void web_restore_file(const char *path) {
+    char *stored = web_load_text(path);
+    if (!stored) return;
+    FILE *f = fopen(path, "w");
+    if (f) { fputs(stored, f); fclose(f); }
+    free(stored);
+}
+
+static void web_persist_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(len + 1);
+    if (!buf) { fclose(f); return; }
+    size_t n = fread(buf, 1, len, f);
+    buf[n] = 0;
+    fclose(f);
+    web_save_text(path, buf);
+    free(buf);
+}
+#else
+#define web_restore_file(p) ((void)0)
+#define web_persist_file(p) ((void)0)
+#endif
 
 #define SCREEN_W 960
 #define SCREEN_H 660
@@ -242,6 +288,7 @@ static bool save_walkbox(const char *path, const Walkbox *wb) {
         fprintf(f, "%d %d\n", (int)wb->p[i].x, (int)wb->p[i].y);
     }
     fclose(f);
+    web_persist_file(path);
     return true;
 }
 
@@ -366,6 +413,7 @@ static bool save_anims_to_file(const char *path, const Animation *anims) {
         fprintf(f, "\n");
     }
     fclose(f);
+    web_persist_file(path);
     return true;
 }
 
@@ -382,6 +430,7 @@ static bool save_fg_list(const char *path, const Walkbox *fgs, int count) {
         written++;
     }
     fclose(f);
+    web_persist_file(path);
     return true;
 }
 
@@ -631,6 +680,9 @@ int main(void) {
         },
         .n = 4,
     };
+    web_restore_file(WALKBOX_PATH);
+    web_restore_file(FG_PATH);
+    web_restore_file(SPRITES_META_PATH);
     load_walkbox(WALKBOX_PATH, &dock);
 
     Walkbox fgs[MAX_FG_POLYS] = { 0 };

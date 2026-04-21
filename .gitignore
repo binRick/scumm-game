@@ -1,6 +1,4 @@
 scumm-game
-*.o
-*.dSYM/
-player.txt
-.DS_Store
+scumm-game.exe
 scumm-game.app/
+player.txt
