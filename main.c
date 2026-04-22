@@ -56,8 +56,6 @@ static void web_persist_file(const char *path) {
 #define PLAY_H (SCREEN_H - VERB_BAR_H)
 #define ACTOR_SPEED 140.0f
 #define MESSAGE_TIME 3.0f
-#define ACTOR_SCALE_TOP    0.55f
-#define ACTOR_SCALE_BOTTOM 1.0f
 #define MAX_WB_VERTS 128
 #define MAX_WB_POLYS 8
 #define MAX_FG_POLYS 16
@@ -66,6 +64,7 @@ static void web_persist_file(const char *path) {
 #define WALKBOX_PATH "walkbox.txt"
 #define FG_PATH "fg.txt"
 #define HOLE_PATH "holes.txt"
+#define SCALE_PATH "scale.txt"
 #define PLAYER_POS_PATH "player.txt"
 #define PLAYER_POS_INTERVAL 0.1f
 #define MAX_SPRITES 300
@@ -194,8 +193,12 @@ static Vector2 clamp_to_walkable(Vector2 p,
     return best_d2 == INFINITY ? p : best;
 }
 
-static float actor_scale_at_multi(Vector2 pos, const Walkbox *polys, int count) {
-    if (count <= 0) return 1.0f;
+typedef struct {
+    float y_top, s_top;
+    float y_bot, s_bot;
+} ScaleConfig;
+
+static ScaleConfig default_scale_for_walkboxes(const Walkbox *polys, int count) {
     float y_top = INFINITY, y_bot = -INFINITY;
     for (int k = 0; k < count; k++) {
         for (int i = 0; i < polys[k].n; i++) {
@@ -203,11 +206,36 @@ static float actor_scale_at_multi(Vector2 pos, const Walkbox *polys, int count) 
             if (polys[k].p[i].y > y_bot) y_bot = polys[k].p[i].y;
         }
     }
-    if (y_top == INFINITY) return 1.0f;
-    float t = (y_bot <= y_top) ? 1.0f : (pos.y - y_top) / (y_bot - y_top);
+    if (y_top == INFINITY) { y_top = 0.0f; y_bot = (float)PLAY_H; }
+    return (ScaleConfig){ .y_top = y_top, .s_top = 0.2f, .y_bot = y_bot, .s_bot = 1.0f };
+}
+
+static bool load_scale(const char *path, ScaleConfig *cfg) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    float yt, st, yb, sb;
+    int ok = fscanf(f, "%f %f %f %f", &yt, &st, &yb, &sb);
+    fclose(f);
+    if (ok != 4) return false;
+    cfg->y_top = yt; cfg->s_top = st; cfg->y_bot = yb; cfg->s_bot = sb;
+    return true;
+}
+
+static bool save_scale(const char *path, const ScaleConfig *cfg) {
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "%.2f %.4f\n%.2f %.4f\n", cfg->y_top, cfg->s_top, cfg->y_bot, cfg->s_bot);
+    fclose(f);
+    web_persist_file(path);
+    return true;
+}
+
+static float actor_scale_at_y(float y, const ScaleConfig *cfg) {
+    float dy = cfg->y_bot - cfg->y_top;
+    float t = (fabsf(dy) < 0.001f) ? 0.5f : (y - cfg->y_top) / dy;
     if (t < 0) t = 0;
     if (t > 1) t = 1;
-    return ACTOR_SCALE_TOP + (ACTOR_SCALE_BOTTOM - ACTOR_SCALE_TOP) * t;
+    return cfg->s_top + (cfg->s_bot - cfg->s_top) * t;
 }
 
 static int find_path_multi(Vector2 start, Vector2 end,
@@ -715,6 +743,7 @@ int main(void) {
     web_restore_file(WALKBOX_PATH);
     web_restore_file(FG_PATH);
     web_restore_file(HOLE_PATH);
+    web_restore_file(SCALE_PATH);
     web_restore_file(SPRITES_META_PATH);
 
     Walkbox docks[MAX_WB_POLYS] = { 0 };
@@ -729,6 +758,9 @@ int main(void) {
 
     Walkbox holes[MAX_WB_POLYS] = { 0 };
     int hole_count = load_fg_list(HOLE_PATH, holes, MAX_WB_POLYS);
+
+    ScaleConfig scale_cfg = default_scale_for_walkboxes(docks, dock_count);
+    load_scale(SCALE_PATH, &scale_cfg);
 
     Walkbox fgs[MAX_FG_POLYS] = { 0 };
     int fg_count = load_fg_list(FG_PATH, fgs, MAX_FG_POLYS);
@@ -761,12 +793,13 @@ int main(void) {
     bool debug_overlay = false;
     bool edit_mode = false;
     Camera2D edit_cam = { .target = { 0, 0 }, .offset = { 0, 0 }, .rotation = 0.0f, .zoom = 1.0f };
-    enum { EDIT_WB, EDIT_FG, EDIT_HOLE };
+    enum { EDIT_WB, EDIT_FG, EDIT_HOLE, EDIT_SCALE };
     int edit_target = EDIT_WB;
     int editing_fg_idx = 0;
     int editing_wb_idx = 0;
     int editing_hole_idx = 0;
     int dragging_vert = -1;
+    int dragging_scale_line = -1;
     float save_flash = 0.0f;
     float pos_log_timer = 0.0f;
     Vector2 last_logged_pos = { -9999, -9999 };
@@ -937,7 +970,8 @@ int main(void) {
                 bool ok_wb = save_fg_list(WALKBOX_PATH, docks, dock_count);
                 bool ok_fg = save_fg_list(FG_PATH, fgs, fg_count);
                 bool ok_h  = save_fg_list(HOLE_PATH, holes, hole_count);
-                if (ok_wb || ok_fg || ok_h) save_flash = 1.5f;
+                bool ok_s  = save_scale(SCALE_PATH, &scale_cfg);
+                if (ok_wb || ok_fg || ok_h || ok_s) save_flash = 1.5f;
                 actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
                 actor.target = actor.pos;
                 actor.moving = false;
@@ -971,6 +1005,11 @@ int main(void) {
                 if (hole_count == 0) { hole_count = 1; holes[0].n = 0; }
                 if (editing_hole_idx >= hole_count) editing_hole_idx = 0;
             }
+        }
+        if (edit_mode && IsKeyPressed(KEY_K)) {
+            dragging_vert = -1;
+            dragging_scale_line = -1;
+            edit_target = EDIT_SCALE;
         }
         if (edit_mode && IsKeyPressed(KEY_N)) {
             if (edit_target == EDIT_FG && fg_count < MAX_FG_POLYS) {
@@ -1020,7 +1059,40 @@ int main(void) {
             snprintf(status_line, sizeof(status_line), "%s", verb_names[selected_verb]);
         }
 
-        if (edit_mode) {
+        if (edit_mode && edit_target == EDIT_SCALE) {
+            if (IsKeyPressed(KEY_R)) {
+                scale_cfg = default_scale_for_walkboxes(docks, dock_count);
+                dragging_scale_line = -1;
+            }
+            if (IsKeyPressed(KEY_S)) {
+                if (save_scale(SCALE_PATH, &scale_cfg)) save_flash = 1.5f;
+            }
+            if (mouse_screen.y < PLAY_H) {
+                float d_top = fabsf(mouse.y - scale_cfg.y_top);
+                float d_bot = fabsf(mouse.y - scale_cfg.y_bot);
+                int nearest = (d_top < d_bot) ? 0 : 1;
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    dragging_scale_line = nearest;
+                }
+                if (dragging_scale_line >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                    float y = mouse.y;
+                    if (y < 0) y = 0;
+                    if (y > PLAY_H) y = (float)PLAY_H;
+                    if (dragging_scale_line == 0) scale_cfg.y_top = y;
+                    else                          scale_cfg.y_bot = y;
+                }
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) dragging_scale_line = -1;
+                bool up   = IsKeyPressed(KEY_UP)   || IsKeyPressedRepeat(KEY_UP);
+                bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN);
+                if (up || down) {
+                    float delta = up ? 0.02f : -0.02f;
+                    float *s = (nearest == 0) ? &scale_cfg.s_top : &scale_cfg.s_bot;
+                    *s += delta;
+                    if (*s < 0.05f) *s = 0.05f;
+                    if (*s > 3.0f)  *s = 3.0f;
+                }
+            }
+        } else if (edit_mode) {
             Walkbox *active;
             if (edit_target == EDIT_FG)        active = &fgs[editing_fg_idx];
             else if (edit_target == EDIT_HOLE) active = &holes[editing_hole_idx];
@@ -1171,7 +1243,7 @@ int main(void) {
             DrawText("(missing assets/bg-dock.png)", 20, 20, 20, RED);
         }
 
-        float s = actor_scale_at_multi(actor.pos, docks, dock_count);
+        float s = actor_scale_at_y(actor.pos.y, &scale_cfg);
         int ax = (int)actor.pos.x, ay = (int)actor.pos.y;
 
         int want_anim;
@@ -1298,7 +1370,28 @@ int main(void) {
                 }
             }
             if (!edit_mode) DrawCircleV(actor.target, 4, RED);
-            if (edit_mode && dragging_vert < 0 && mouse.y < PLAY_H) {
+            if (edit_mode) {
+                bool scale_active = (edit_target == EDIT_SCALE);
+                unsigned char base_a = scale_active ? 220 : 90;
+                unsigned char near_a = scale_active ? 255 : 130;
+                float d_top = fabsf(mouse.y - scale_cfg.y_top);
+                float d_bot = fabsf(mouse.y - scale_cfg.y_bot);
+                int hot = scale_active ? ((d_top < d_bot) ? 0 : 1) : -1;
+                for (int k = 0; k < 2; k++) {
+                    float y = (k == 0) ? scale_cfg.y_top : scale_cfg.y_bot;
+                    float sv = (k == 0) ? scale_cfg.s_top : scale_cfg.s_bot;
+                    bool hot_line = (hot == k);
+                    unsigned char a = hot_line ? near_a : base_a;
+                    Color c = { 255, 220, 80, a };
+                    DrawLineEx((Vector2){ 0, y }, (Vector2){ (float)SCREEN_W, y },
+                               hot_line ? 3.0f : 2.0f, c);
+                    char lbl[64];
+                    snprintf(lbl, sizeof(lbl), "%s  y=%d  s=%.2f",
+                             (k == 0) ? "TOP" : "BOT", (int)y, sv);
+                    DrawText(lbl, 8, (int)y - 18, 14, c);
+                }
+            }
+            if (edit_mode && edit_target != EDIT_SCALE && dragging_vert < 0 && mouse.y < PLAY_H) {
                 Walkbox *active;
                 if (edit_target == EDIT_FG)        active = &fgs[editing_fg_idx];
                 else if (edit_target == EDIT_HOLE) active = &holes[editing_hole_idx];
@@ -1347,7 +1440,9 @@ int main(void) {
         if (edit_mode) {
             char edit_status[160];
             Color head_col;
-            Walkbox *active_warn;
+            Walkbox *active_warn = NULL;
+            const char *hint =
+                "[W]/[F]/[H]/[K] wb/fg/hole/scale  [N] new  [Bksp] delete  [O] auto-order  [R] reset  [S] save  [E] exit";
             if (edit_target == EDIT_FG) {
                 snprintf(edit_status, sizeof(edit_status), "EDIT FOREGROUND #%d/%d  verts: %d",
                          editing_fg_idx + 1, fg_count, fgs[editing_fg_idx].n);
@@ -1359,6 +1454,13 @@ int main(void) {
                          hole_count > 0 ? holes[editing_hole_idx].n : 0);
                 head_col = (Color){ 255, 180, 80, 255 };
                 active_warn = hole_count > 0 ? &holes[editing_hole_idx] : NULL;
+            } else if (edit_target == EDIT_SCALE) {
+                snprintf(edit_status, sizeof(edit_status),
+                         "EDIT SCALE  TOP y=%d s=%.2f   BOT y=%d s=%.2f",
+                         (int)scale_cfg.y_top, scale_cfg.s_top,
+                         (int)scale_cfg.y_bot, scale_cfg.s_bot);
+                head_col = (Color){ 255, 220, 80, 255 };
+                hint = "[drag] move line  [Up/Down] scale +/-  [R] reset to walkbox extent  [S] save  [E] exit";
             } else {
                 snprintf(edit_status, sizeof(edit_status), "EDIT WALKBOX #%d/%d  verts: %d",
                          editing_wb_idx + 1, dock_count, docks[editing_wb_idx].n);
@@ -1366,8 +1468,7 @@ int main(void) {
                 active_warn = &docks[editing_wb_idx];
             }
             DrawText(edit_status, 230, PLAY_H + 30, 22, head_col);
-            DrawText("[W]/[F]/[H] wb/fg/hole + cycle  [N] new  [Bksp] delete  [O] auto-order  [R] reset  [S] save  [E] exit",
-                     230, PLAY_H + 70, 14, (Color){ 180, 180, 200, 255 });
+            DrawText(hint, 230, PLAY_H + 70, 14, (Color){ 180, 180, 200, 255 });
             if (active_warn && has_self_intersection(active_warn)) {
                 DrawText("(!) edges cross -- press [O] to auto-order",
                          230, PLAY_H + 55, 14, (Color){ 255, 130, 130, 255 });
