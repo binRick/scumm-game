@@ -59,11 +59,13 @@ static void web_persist_file(const char *path) {
 #define ACTOR_SCALE_TOP    0.55f
 #define ACTOR_SCALE_BOTTOM 1.0f
 #define MAX_WB_VERTS 128
+#define MAX_WB_POLYS 8
 #define MAX_FG_POLYS 16
 #define VERT_GRAB_RADIUS 10.0f
 #define EDGE_GRAB_RADIUS 12.0f
 #define WALKBOX_PATH "walkbox.txt"
 #define FG_PATH "fg.txt"
+#define HOLE_PATH "holes.txt"
 #define PLAYER_POS_PATH "player.txt"
 #define PLAYER_POS_INTERVAL 0.1f
 #define MAX_SPRITES 300
@@ -131,52 +133,141 @@ static Vector2 closest_on_segment(Vector2 a, Vector2 b, Vector2 p) {
     return (Vector2){ a.x + ab.x * t, a.y + ab.y * t };
 }
 
-static bool segments_cross(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4);
+static int containing_poly(Vector2 p, const Walkbox *polys, int count) {
+    for (int i = 0; i < count; i++) {
+        if (point_in_polygon(p, &polys[i])) return i;
+    }
+    return -1;
+}
 
-static bool segment_clear(Vector2 a, Vector2 b, const Walkbox *wb) {
-    Vector2 mid = { (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f };
-    if (!point_in_polygon(mid, wb)) return false;
-    for (int i = 0; i < wb->n; i++) {
-        Vector2 p = wb->p[i], q = wb->p[(i + 1) % wb->n];
-        if (segments_cross(a, b, p, q)) return false;
+static bool is_walkable(Vector2 p, const Walkbox *polys, int poly_count,
+                        const Walkbox *holes, int hole_count) {
+    if (containing_poly(p, polys, poly_count) < 0) return false;
+    if (hole_count > 0 && containing_poly(p, holes, hole_count) >= 0) return false;
+    return true;
+}
+
+static bool segment_clear_multi(Vector2 a, Vector2 b,
+                                const Walkbox *polys, int poly_count,
+                                const Walkbox *holes, int hole_count) {
+    if (poly_count <= 0) return false;
+    float dx = b.x - a.x, dy = b.y - a.y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.5f) return true;
+    int steps = (int)(len / 2.0f);
+    if (steps < 4) steps = 4;
+    for (int i = 1; i < steps; i++) {
+        float t = (float)i / (float)steps;
+        Vector2 p = { a.x + dx * t, a.y + dy * t };
+        if (!is_walkable(p, polys, poly_count, holes, hole_count)) return false;
     }
     return true;
 }
 
-static int find_path(Vector2 start, Vector2 end, const Walkbox *wb, Vector2 *out, int max_out) {
-    if (wb->n < 3 || max_out < 2) {
-        if (max_out >= 2) { out[0] = start; out[1] = end; return 2; }
-        return 0;
+static Vector2 clamp_to_walkable(Vector2 p,
+                                 const Walkbox *polys, int poly_count,
+                                 const Walkbox *holes, int hole_count) {
+    if (poly_count <= 0) return p;
+    if (is_walkable(p, polys, poly_count, holes, hole_count)) return p;
+    Vector2 best = p;
+    float best_d2 = INFINITY;
+    for (int k = 0; k < poly_count; k++) {
+        const Walkbox *wb = &polys[k];
+        if (wb->n < 2) continue;
+        for (int i = 0; i < wb->n; i++) {
+            Vector2 c = closest_on_segment(wb->p[i], wb->p[(i + 1) % wb->n], p);
+            float ddx = c.x - p.x, ddy = c.y - p.y;
+            float d2 = ddx * ddx + ddy * ddy;
+            if (d2 < best_d2) { best_d2 = d2; best = c; }
+        }
     }
-    if (segment_clear(start, end, wb)) {
+    for (int k = 0; k < hole_count; k++) {
+        const Walkbox *h = &holes[k];
+        if (h->n < 2) continue;
+        for (int i = 0; i < h->n; i++) {
+            Vector2 c = closest_on_segment(h->p[i], h->p[(i + 1) % h->n], p);
+            float ddx = c.x - p.x, ddy = c.y - p.y;
+            float d2 = ddx * ddx + ddy * ddy;
+            if (d2 < best_d2) { best_d2 = d2; best = c; }
+        }
+    }
+    return best_d2 == INFINITY ? p : best;
+}
+
+static float actor_scale_at_multi(Vector2 pos, const Walkbox *polys, int count) {
+    if (count <= 0) return 1.0f;
+    float y_top = INFINITY, y_bot = -INFINITY;
+    for (int k = 0; k < count; k++) {
+        for (int i = 0; i < polys[k].n; i++) {
+            if (polys[k].p[i].y < y_top) y_top = polys[k].p[i].y;
+            if (polys[k].p[i].y > y_bot) y_bot = polys[k].p[i].y;
+        }
+    }
+    if (y_top == INFINITY) return 1.0f;
+    float t = (y_bot <= y_top) ? 1.0f : (pos.y - y_top) / (y_bot - y_top);
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    return ACTOR_SCALE_TOP + (ACTOR_SCALE_BOTTOM - ACTOR_SCALE_TOP) * t;
+}
+
+static int find_path_multi(Vector2 start, Vector2 end,
+                           const Walkbox *polys, int poly_count,
+                           const Walkbox *holes, int hole_count,
+                           Vector2 *out, int max_out) {
+    if (max_out < 2) return 0;
+    if (poly_count <= 0) { out[0] = start; out[1] = end; return 2; }
+    if (segment_clear_multi(start, end, polys, poly_count, holes, hole_count)) {
         out[0] = start;
         out[1] = end;
         return 2;
     }
 
-    int n = wb->n;
+    Vector2 nodes[MAX_WB_VERTS + 2];
+    int poly_of[MAX_WB_VERTS + 2];
+    int vert_of[MAX_WB_VERTS + 2];
+    int kind_of[MAX_WB_VERTS + 2]; // 0 = walkbox, 1 = hole
+    int n = 0;
+    for (int k = 0; k < poly_count && n < MAX_WB_VERTS; k++) {
+        for (int i = 0; i < polys[k].n && n < MAX_WB_VERTS; i++) {
+            nodes[n] = polys[k].p[i];
+            poly_of[n] = k;
+            vert_of[n] = i;
+            kind_of[n] = 0;
+            n++;
+        }
+    }
+    for (int k = 0; k < hole_count && n < MAX_WB_VERTS; k++) {
+        for (int i = 0; i < holes[k].n && n < MAX_WB_VERTS; i++) {
+            nodes[n] = holes[k].p[i];
+            poly_of[n] = k;
+            vert_of[n] = i;
+            kind_of[n] = 1;
+            n++;
+        }
+    }
     int SI = n;
     int EI = n + 1;
     int N = n + 2;
-
-    Vector2 nodes[MAX_WB_VERTS + 2];
-    for (int i = 0; i < n; i++) nodes[i] = wb->p[i];
-    nodes[SI] = start;
-    nodes[EI] = end;
+    nodes[SI] = start; poly_of[SI] = -1; vert_of[SI] = -1; kind_of[SI] = -1;
+    nodes[EI] = end;   poly_of[EI] = -1; vert_of[EI] = -1; kind_of[EI] = -1;
 
     static float W[MAX_WB_VERTS + 2][MAX_WB_VERTS + 2];
     for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++) {
-            if (i == j) { W[i][j] = 0; continue; }
-            bool adj = (i < n && j < n) &&
-                       (j == (i + 1) % n || i == (j + 1) % n);
-            bool clear = adj || segment_clear(nodes[i], nodes[j], wb);
+        W[i][i] = 0;
+        for (int j = i + 1; j < N; j++) {
+            bool adj = false;
+            if (i < n && j < n && kind_of[i] == kind_of[j] && poly_of[i] == poly_of[j]) {
+                int ring = (kind_of[i] == 0) ? polys[poly_of[i]].n : holes[poly_of[i]].n;
+                int vi = vert_of[i], vj = vert_of[j];
+                if (vj == (vi + 1) % ring || vi == (vj + 1) % ring) adj = true;
+            }
+            bool clear = adj || segment_clear_multi(nodes[i], nodes[j], polys, poly_count, holes, hole_count);
             if (clear) {
-                float dx = nodes[i].x - nodes[j].x;
-                float dy = nodes[i].y - nodes[j].y;
-                W[i][j] = sqrtf(dx * dx + dy * dy);
+                float ddx = nodes[i].x - nodes[j].x;
+                float ddy = nodes[i].y - nodes[j].y;
+                W[i][j] = W[j][i] = sqrtf(ddx * ddx + ddy * ddy);
             } else {
-                W[i][j] = INFINITY;
+                W[i][j] = W[j][i] = INFINITY;
             }
         }
     }
@@ -218,33 +309,6 @@ static int find_path(Vector2 start, Vector2 end, const Walkbox *wb, Vector2 *out
     return out_count;
 }
 
-static Vector2 clamp_to_walkbox(Vector2 p, const Walkbox *wb) {
-    if (wb->n < 3) return p;
-    if (point_in_polygon(p, wb)) return p;
-    Vector2 best = wb->p[0];
-    float best_d2 = INFINITY;
-    for (int i = 0; i < wb->n; i++) {
-        Vector2 c = closest_on_segment(wb->p[i], wb->p[(i + 1) % wb->n], p);
-        float dx = c.x - p.x, dy = c.y - p.y;
-        float d2 = dx * dx + dy * dy;
-        if (d2 < best_d2) { best_d2 = d2; best = c; }
-    }
-    return best;
-}
-
-static float actor_scale_at(Vector2 pos, const Walkbox *wb) {
-    if (wb->n < 1) return 1.0f;
-    float y_top = wb->p[0].y, y_bot = wb->p[0].y;
-    for (int i = 1; i < wb->n; i++) {
-        if (wb->p[i].y < y_top) y_top = wb->p[i].y;
-        if (wb->p[i].y > y_bot) y_bot = wb->p[i].y;
-    }
-    float t = (y_bot <= y_top) ? 1.0f : (pos.y - y_top) / (y_bot - y_top);
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    return ACTOR_SCALE_TOP + (ACTOR_SCALE_BOTTOM - ACTOR_SCALE_TOP) * t;
-}
-
 static int nearest_vertex(Vector2 p, const Walkbox *wb, float max_radius) {
     int best = -1;
     float best_d2 = max_radius * max_radius;
@@ -279,29 +343,6 @@ static int insert_vertex(Walkbox *wb, int after_idx, Vector2 v) {
     wb->p[at] = v;
     wb->n++;
     return at;
-}
-
-static bool save_walkbox(const char *path, const Walkbox *wb) {
-    FILE *f = fopen(path, "w");
-    if (!f) return false;
-    for (int i = 0; i < wb->n; i++) {
-        fprintf(f, "%d %d\n", (int)wb->p[i].x, (int)wb->p[i].y);
-    }
-    fclose(f);
-    web_persist_file(path);
-    return true;
-}
-
-static bool load_walkbox(const char *path, Walkbox *wb) {
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
-    wb->n = 0;
-    float x, y;
-    while (wb->n < MAX_WB_VERTS && fscanf(f, "%f %f", &x, &y) == 2) {
-        wb->p[wb->n++] = (Vector2){ x, y };
-    }
-    fclose(f);
-    return wb->n >= 3;
 }
 
 static int load_fg_list(const char *path, Walkbox *out, int max_polys) {
@@ -671,19 +712,23 @@ int main(void) {
 
     Texture2D bg = LoadTexture("assets/bg-dock.png");
 
-    Walkbox dock = {
-        .p = {
-            { 260, 320 },
-            { 680, 320 },
-            { 940, 540 },
-            {  20, 540 },
-        },
-        .n = 4,
-    };
     web_restore_file(WALKBOX_PATH);
     web_restore_file(FG_PATH);
+    web_restore_file(HOLE_PATH);
     web_restore_file(SPRITES_META_PATH);
-    load_walkbox(WALKBOX_PATH, &dock);
+
+    Walkbox docks[MAX_WB_POLYS] = { 0 };
+    int dock_count = load_fg_list(WALKBOX_PATH, docks, MAX_WB_POLYS);
+    if (dock_count <= 0) {
+        dock_count = 1;
+        docks[0] = (Walkbox){
+            .p = { { 260, 320 }, { 680, 320 }, { 940, 540 }, { 20, 540 } },
+            .n = 4,
+        };
+    }
+
+    Walkbox holes[MAX_WB_POLYS] = { 0 };
+    int hole_count = load_fg_list(HOLE_PATH, holes, MAX_WB_POLYS);
 
     Walkbox fgs[MAX_FG_POLYS] = { 0 };
     int fg_count = load_fg_list(FG_PATH, fgs, MAX_FG_POLYS);
@@ -706,7 +751,7 @@ int main(void) {
         .pending_verb = VERB_LOOK,
         .pending_hotspot = NULL,
     };
-    actor.pos = clamp_to_walkbox(actor.pos, &dock);
+    actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
     actor.target = actor.pos;
 
     Verb selected_verb = VERB_LOOK;
@@ -716,8 +761,11 @@ int main(void) {
     bool debug_overlay = false;
     bool edit_mode = false;
     Camera2D edit_cam = { .target = { 0, 0 }, .offset = { 0, 0 }, .rotation = 0.0f, .zoom = 1.0f };
-    bool editing_fg = false;
+    enum { EDIT_WB, EDIT_FG, EDIT_HOLE };
+    int edit_target = EDIT_WB;
     int editing_fg_idx = 0;
+    int editing_wb_idx = 0;
+    int editing_hole_idx = 0;
     int dragging_vert = -1;
     float save_flash = 0.0f;
     float pos_log_timer = 0.0f;
@@ -886,37 +934,82 @@ int main(void) {
             edit_cam.target = (Vector2){ 0, 0 };
             edit_cam.offset = (Vector2){ 0, 0 };
             if (!edit_mode) {
-                bool ok_wb = (dock.n >= 3) ? save_walkbox(WALKBOX_PATH, &dock) : false;
+                bool ok_wb = save_fg_list(WALKBOX_PATH, docks, dock_count);
                 bool ok_fg = save_fg_list(FG_PATH, fgs, fg_count);
-                if (ok_wb || ok_fg) save_flash = 1.5f;
-                actor.pos = clamp_to_walkbox(actor.pos, &dock);
+                bool ok_h  = save_fg_list(HOLE_PATH, holes, hole_count);
+                if (ok_wb || ok_fg || ok_h) save_flash = 1.5f;
+                actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
                 actor.target = actor.pos;
                 actor.moving = false;
             }
         }
-        if (edit_mode && IsKeyPressed(KEY_W)) { editing_fg = false; dragging_vert = -1; }
-        if (edit_mode && IsKeyPressed(KEY_F)) {
+        if (edit_mode && IsKeyPressed(KEY_W)) {
             dragging_vert = -1;
-            if (!editing_fg) {
-                editing_fg = true;
-                if (fg_count == 0) { fg_count = 1; fgs[0].n = 0; }
-                if (editing_fg_idx >= fg_count) editing_fg_idx = 0;
-            } else if (fg_count > 1) {
-                editing_fg_idx = (editing_fg_idx + 1) % fg_count;
+            if (edit_target == EDIT_WB) {
+                if (dock_count > 1) editing_wb_idx = (editing_wb_idx + 1) % dock_count;
+            } else {
+                edit_target = EDIT_WB;
+                if (editing_wb_idx >= dock_count) editing_wb_idx = 0;
             }
         }
-        if (edit_mode && editing_fg && IsKeyPressed(KEY_N) && fg_count < MAX_FG_POLYS) {
-            fgs[fg_count].n = 0;
-            editing_fg_idx = fg_count;
-            fg_count++;
+        if (edit_mode && IsKeyPressed(KEY_F)) {
             dragging_vert = -1;
+            if (edit_target == EDIT_FG) {
+                if (fg_count > 1) editing_fg_idx = (editing_fg_idx + 1) % fg_count;
+            } else {
+                edit_target = EDIT_FG;
+                if (fg_count == 0) { fg_count = 1; fgs[0].n = 0; }
+                if (editing_fg_idx >= fg_count) editing_fg_idx = 0;
+            }
         }
-        if (edit_mode && editing_fg && IsKeyPressed(KEY_BACKSPACE) && fg_count > 0) {
-            for (int i = editing_fg_idx; i < fg_count - 1; i++) fgs[i] = fgs[i + 1];
-            fg_count--;
-            if (fg_count == 0) { fg_count = 1; fgs[0].n = 0; editing_fg_idx = 0; }
-            else if (editing_fg_idx >= fg_count) editing_fg_idx = fg_count - 1;
+        if (edit_mode && IsKeyPressed(KEY_H)) {
             dragging_vert = -1;
+            if (edit_target == EDIT_HOLE) {
+                if (hole_count > 1) editing_hole_idx = (editing_hole_idx + 1) % hole_count;
+            } else {
+                edit_target = EDIT_HOLE;
+                if (hole_count == 0) { hole_count = 1; holes[0].n = 0; }
+                if (editing_hole_idx >= hole_count) editing_hole_idx = 0;
+            }
+        }
+        if (edit_mode && IsKeyPressed(KEY_N)) {
+            if (edit_target == EDIT_FG && fg_count < MAX_FG_POLYS) {
+                fgs[fg_count].n = 0;
+                editing_fg_idx = fg_count;
+                fg_count++;
+                dragging_vert = -1;
+            } else if (edit_target == EDIT_WB && dock_count < MAX_WB_POLYS) {
+                docks[dock_count].n = 0;
+                editing_wb_idx = dock_count;
+                dock_count++;
+                dragging_vert = -1;
+            } else if (edit_target == EDIT_HOLE && hole_count < MAX_WB_POLYS) {
+                holes[hole_count].n = 0;
+                editing_hole_idx = hole_count;
+                hole_count++;
+                dragging_vert = -1;
+            }
+        }
+        if (edit_mode && IsKeyPressed(KEY_BACKSPACE)) {
+            if (edit_target == EDIT_FG && fg_count > 0) {
+                for (int i = editing_fg_idx; i < fg_count - 1; i++) fgs[i] = fgs[i + 1];
+                fg_count--;
+                if (fg_count == 0) { fg_count = 1; fgs[0].n = 0; editing_fg_idx = 0; }
+                else if (editing_fg_idx >= fg_count) editing_fg_idx = fg_count - 1;
+                dragging_vert = -1;
+            } else if (edit_target == EDIT_WB && dock_count > 0) {
+                for (int i = editing_wb_idx; i < dock_count - 1; i++) docks[i] = docks[i + 1];
+                dock_count--;
+                if (dock_count == 0) { dock_count = 1; docks[0].n = 0; editing_wb_idx = 0; }
+                else if (editing_wb_idx >= dock_count) editing_wb_idx = dock_count - 1;
+                dragging_vert = -1;
+            } else if (edit_target == EDIT_HOLE && hole_count > 0) {
+                for (int i = editing_hole_idx; i < hole_count - 1; i++) holes[i] = holes[i + 1];
+                hole_count--;
+                if (hole_count == 0) { hole_count = 1; holes[0].n = 0; editing_hole_idx = 0; }
+                else if (editing_hole_idx >= hole_count) editing_hole_idx = hole_count - 1;
+                dragging_vert = -1;
+            }
         }
 
         Hotspot *hover = NULL;
@@ -928,12 +1021,17 @@ int main(void) {
         }
 
         if (edit_mode) {
-            Walkbox *active = editing_fg ? &fgs[editing_fg_idx] : &dock;
+            Walkbox *active;
+            if (edit_target == EDIT_FG)        active = &fgs[editing_fg_idx];
+            else if (edit_target == EDIT_HOLE) active = &holes[editing_hole_idx];
+            else                               active = &docks[editing_wb_idx];
             if (IsKeyPressed(KEY_R)) { active->n = 0; dragging_vert = -1; }
             if (IsKeyPressed(KEY_O)) { sort_poly_by_centroid(active); dragging_vert = -1; }
             if (IsKeyPressed(KEY_S)) {
-                bool ok = editing_fg ? save_fg_list(FG_PATH, fgs, fg_count)
-                                     : (active->n >= 3 && save_walkbox(WALKBOX_PATH, active));
+                bool ok;
+                if (edit_target == EDIT_FG)        ok = save_fg_list(FG_PATH, fgs, fg_count);
+                else if (edit_target == EDIT_HOLE) ok = save_fg_list(HOLE_PATH, holes, hole_count);
+                else                               ok = save_fg_list(WALKBOX_PATH, docks, dock_count);
                 if (ok) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
@@ -972,10 +1070,11 @@ int main(void) {
             }
 
             if (!clicked_verb && mouse.y < PLAY_H) {
-                actor.pos = clamp_to_walkbox(actor.pos, &dock);
-                Vector2 final_target = clamp_to_walkbox(mouse, &dock);
-                int nw = find_path(actor.pos, final_target, &dock,
-                                   actor.waypoints, MAX_WB_VERTS + 2);
+                actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
+                Vector2 final_target = clamp_to_walkable(mouse, docks, dock_count, holes, hole_count);
+                int nw = find_path_multi(actor.pos, final_target,
+                                         docks, dock_count, holes, hole_count,
+                                         actor.waypoints, MAX_WB_VERTS + 2);
                 actor.pending_hotspot = hover;
                 actor.pending_verb = selected_verb;
                 if (nw >= 2) {
@@ -1046,7 +1145,7 @@ int main(void) {
                 actor.pos.y += d.y / dist * step;
             }
         } else if (!edit_mode && !browser_mode) {
-            Vector2 c = clamp_to_walkbox(actor.pos, &dock);
+            Vector2 c = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
             if (c.x != actor.pos.x || c.y != actor.pos.y) {
                 actor.pos = c;
                 actor.target = c;
@@ -1072,7 +1171,7 @@ int main(void) {
             DrawText("(missing assets/bg-dock.png)", 20, 20, 20, RED);
         }
 
-        float s = actor_scale_at(actor.pos, &dock);
+        float s = actor_scale_at_multi(actor.pos, docks, dock_count);
         int ax = (int)actor.pos.x, ay = (int)actor.pos.y;
 
         int want_anim;
@@ -1139,25 +1238,30 @@ int main(void) {
             Color wb_vert = { 0, 220, 255, 255 };
             Color fg_edge = { 255, 100, 220, 220 };
             Color fg_vert = { 255, 100, 220, 255 };
-            bool wb_active = edit_mode && !editing_fg;
-            Color we = wb_edge, wv = wb_vert;
-            if (edit_mode && !wb_active) { we.a = 100; wv.a = 140; }
-            for (int i = 0; i < dock.n; i++) {
-                Vector2 a = dock.p[i];
-                if (dock.n >= 2) {
-                    Vector2 b = dock.p[(i + 1) % dock.n];
-                    if (dock.n >= 3 || i + 1 < dock.n) DrawLineEx(a, b, 2.0f, we);
-                }
-                float r = (wb_active && i == dragging_vert) ? 7.0f : 5.0f;
-                DrawCircleV(a, r, wv);
-                if (wb_active || !edit_mode) {
-                    char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", i);
-                    DrawText(lbl, (int)a.x + 8, (int)a.y - 8, 14, wv);
+            Color hole_edge = { 255, 140, 40, 230 };
+            Color hole_vert = { 255, 140, 40, 255 };
+            for (int pi = 0; pi < dock_count; pi++) {
+                const Walkbox *wb = &docks[pi];
+                bool is_active = edit_mode && edit_target == EDIT_WB && pi == editing_wb_idx;
+                Color we = wb_edge, wv = wb_vert;
+                if (edit_mode && !is_active) { we.a = 100; wv.a = 140; }
+                for (int i = 0; i < wb->n; i++) {
+                    Vector2 a = wb->p[i];
+                    if (wb->n >= 2) {
+                        Vector2 b = wb->p[(i + 1) % wb->n];
+                        if (wb->n >= 3 || i + 1 < wb->n) DrawLineEx(a, b, 2.0f, we);
+                    }
+                    float r = (is_active && i == dragging_vert) ? 7.0f : 5.0f;
+                    DrawCircleV(a, r, wv);
+                    if (is_active || !edit_mode) {
+                        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", i);
+                        DrawText(lbl, (int)a.x + 8, (int)a.y - 8, 14, wv);
+                    }
                 }
             }
             for (int pi = 0; pi < fg_count; pi++) {
                 const Walkbox *wb = &fgs[pi];
-                bool is_active = edit_mode && editing_fg && pi == editing_fg_idx;
+                bool is_active = edit_mode && edit_target == EDIT_FG && pi == editing_fg_idx;
                 Color ec = fg_edge, vc = fg_vert;
                 if (edit_mode && !is_active) { ec.a = 80; vc.a = 120; }
                 for (int i = 0; i < wb->n; i++) {
@@ -1174,9 +1278,31 @@ int main(void) {
                     }
                 }
             }
+            for (int pi = 0; pi < hole_count; pi++) {
+                const Walkbox *wb = &holes[pi];
+                bool is_active = edit_mode && edit_target == EDIT_HOLE && pi == editing_hole_idx;
+                Color ec = hole_edge, vc = hole_vert;
+                if (edit_mode && !is_active) { ec.a = 100; vc.a = 140; }
+                for (int i = 0; i < wb->n; i++) {
+                    Vector2 a = wb->p[i];
+                    if (wb->n >= 2) {
+                        Vector2 b = wb->p[(i + 1) % wb->n];
+                        if (wb->n >= 3 || i + 1 < wb->n) DrawLineEx(a, b, 2.0f, ec);
+                    }
+                    float r = (is_active && i == dragging_vert) ? 7.0f : 5.0f;
+                    DrawCircleV(a, r, vc);
+                    if (is_active || !edit_mode) {
+                        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", i);
+                        DrawText(lbl, (int)a.x + 8, (int)a.y - 8, 14, vc);
+                    }
+                }
+            }
             if (!edit_mode) DrawCircleV(actor.target, 4, RED);
             if (edit_mode && dragging_vert < 0 && mouse.y < PLAY_H) {
-                Walkbox *active = editing_fg ? &fgs[editing_fg_idx] : &dock;
+                Walkbox *active;
+                if (edit_target == EDIT_FG)        active = &fgs[editing_fg_idx];
+                else if (edit_target == EDIT_HOLE) active = &holes[editing_hole_idx];
+                else                               active = &docks[editing_wb_idx];
                 int near_v = nearest_vertex(mouse, active, VERT_GRAB_RADIUS);
                 if (near_v >= 0) {
                     DrawCircleLines((int)active->p[near_v].x, (int)active->p[near_v].y, 10, YELLOW);
@@ -1220,24 +1346,35 @@ int main(void) {
 
         if (edit_mode) {
             char edit_status[160];
-            if (editing_fg) {
+            Color head_col;
+            Walkbox *active_warn;
+            if (edit_target == EDIT_FG) {
                 snprintf(edit_status, sizeof(edit_status), "EDIT FOREGROUND #%d/%d  verts: %d",
                          editing_fg_idx + 1, fg_count, fgs[editing_fg_idx].n);
+                head_col = (Color){ 255, 180, 230, 255 };
+                active_warn = &fgs[editing_fg_idx];
+            } else if (edit_target == EDIT_HOLE) {
+                snprintf(edit_status, sizeof(edit_status), "EDIT HOLE #%d/%d  verts: %d",
+                         editing_hole_idx + 1, hole_count,
+                         hole_count > 0 ? holes[editing_hole_idx].n : 0);
+                head_col = (Color){ 255, 180, 80, 255 };
+                active_warn = hole_count > 0 ? &holes[editing_hole_idx] : NULL;
             } else {
-                snprintf(edit_status, sizeof(edit_status), "EDIT WALKBOX  verts: %d", dock.n);
+                snprintf(edit_status, sizeof(edit_status), "EDIT WALKBOX #%d/%d  verts: %d",
+                         editing_wb_idx + 1, dock_count, docks[editing_wb_idx].n);
+                head_col = (Color){ 255, 220, 100, 255 };
+                active_warn = &docks[editing_wb_idx];
             }
-            Color head_col = editing_fg ? (Color){ 255, 180, 230, 255 } : (Color){ 255, 220, 100, 255 };
             DrawText(edit_status, 230, PLAY_H + 30, 22, head_col);
-            DrawText("[W] walkbox  [F] fg/cycle  [N] new fg  [Bksp] delete  [O] auto-order  [R] reset  [S] save  [E] exit",
+            DrawText("[W]/[F]/[H] wb/fg/hole + cycle  [N] new  [Bksp] delete  [O] auto-order  [R] reset  [S] save  [E] exit",
                      230, PLAY_H + 70, 14, (Color){ 180, 180, 200, 255 });
-            Walkbox *active_warn = editing_fg ? &fgs[editing_fg_idx] : &dock;
-            if (has_self_intersection(active_warn)) {
+            if (active_warn && has_self_intersection(active_warn)) {
                 DrawText("(!) edges cross -- press [O] to auto-order",
                          230, PLAY_H + 55, 14, (Color){ 255, 130, 130, 255 });
             }
         } else {
             DrawText(status_line, 230, PLAY_H + 30, 22, (Color){ 200, 200, 220, 255 });
-            DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit walkbox  [B] sprite browser",
+            DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit  [B] sprite browser",
                      230, PLAY_H + 70, 14, (Color){ 140, 140, 160, 255 });
         }
         if (save_flash > 0) {
