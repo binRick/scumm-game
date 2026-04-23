@@ -51,9 +51,9 @@ static void web_persist_file(const char *path) {
 #define web_persist_file(p) ((void)0)
 #endif
 
-#define SCREEN_W 960
-#define SCREEN_H 660
-#define VERB_BAR_H 120
+#define SCREEN_W 1200
+#define SCREEN_H 700
+#define VERB_BAR_H 140
 #define PLAY_H (SCREEN_H - VERB_BAR_H)
 #define ACTOR_SPEED 140.0f
 #define MESSAGE_TIME 3.0f
@@ -66,6 +66,7 @@ static void web_persist_file(const char *path) {
 #define DEFAULT_GAME "monkey1"
 #define DEFAULT_ACTOR "guybrush"
 #define MAX_GAMES 64
+#define MAX_INVENTORY 32
 #define PLAYER_POS_PATH "player.txt"
 #define PLAYER_POS_INTERVAL 0.1f
 #define MAX_SPRITES 300
@@ -224,6 +225,26 @@ static bool save_scale(const char *path, const ScaleConfig *cfg) {
     FILE *f = fopen(path, "w");
     if (!f) return false;
     fprintf(f, "%.2f %.4f\n%.2f %.4f\n", cfg->y_top, cfg->s_top, cfg->y_bot, cfg->s_bot);
+    fclose(f);
+    web_persist_file(path);
+    return true;
+}
+
+static bool load_layout(const char *path, float *w, float *h) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    float lw, lh;
+    int ok = fscanf(f, "%f %f", &lw, &lh);
+    fclose(f);
+    if (ok != 2 || lw <= 0 || lh <= 0) return false;
+    *w = lw; *h = lh;
+    return true;
+}
+
+static bool save_layout(const char *path, float w, float h) {
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "%d %d\n", (int)w, (int)h);
     fclose(f);
     web_persist_file(path);
     return true;
@@ -669,9 +690,9 @@ static void draw_fg_debug_fill(const Walkbox *poly, Color color) {
     }
 }
 
-typedef enum { VERB_LOOK, VERB_USE, VERB_PICKUP, VERB_COUNT } Verb;
+typedef enum { VERB_LOOK, VERB_USE, VERB_PICKUP, VERB_GIVE, VERB_COUNT } Verb;
 
-static const char *verb_names[VERB_COUNT] = { "Look at", "Use", "Pick up" };
+static const char *verb_names[VERB_COUNT] = { "Look at", "Use", "Pick up", "Give" };
 
 typedef struct {
     Rectangle rect;
@@ -683,6 +704,7 @@ typedef struct {
 } Hotspot;
 
 typedef struct {
+    char name[64];
     Vector2 pos;
     Vector2 target;
     bool moving;
@@ -694,7 +716,12 @@ typedef struct {
     Vector2 waypoints[MAX_WB_VERTS + 2];
     int waypoint_count;
     int current_waypoint;
+    AnimTextures anims[ANIM_COUNT];
+    bool ai_follow;
+    int follow_target_idx;
 } Actor;
+
+#define MAX_ACTORS 8
 
 static void update_actor_facing(Actor *a) {
     float dx = a->target.x - a->pos.x;
@@ -741,7 +768,9 @@ typedef struct {
     ScaleConfig scale_cfg;
 
     Texture2D bg;
-    AnimTextures actor_anims[ANIM_COUNT];
+
+    Actor actors[MAX_ACTORS];
+    int actor_count;
 
     char walkbox_path[160];
     char fg_path[160];
@@ -751,7 +780,30 @@ typedef struct {
     char actor_base[160];
     char actor_meta_path[160];
     char actor_decl_path[160];
+    char layout_path[160];
+    char inventory_path[160];
+
+    char inventory[MAX_INVENTORY][64];
+    int  inventory_count;
 } Game;
+
+static int load_inventory(const char *path, char items[][64], int max_items) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int n = 0;
+    char line[128];
+    while (n < max_items && fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' ||
+                           line[len - 1] == ' '  || line[len - 1] == '\t')) line[--len] = 0;
+        char *start = line;
+        while (*start == ' ' || *start == '\t') start++;
+        if (*start == '\0' || *start == '#') continue;
+        snprintf(items[n++], 64, "%s", start);
+    }
+    fclose(f);
+    return n;
+}
 
 static void game_read_actor_decl(const char *game_name, char *out, size_t cap) {
     char path[160];
@@ -774,9 +826,56 @@ static void game_build_paths(Game *g) {
     snprintf(g->scale_path,      sizeof(g->scale_path),      GAMES_DIR "/%s/scale.txt",   g->name);
     snprintf(g->bg_path,         sizeof(g->bg_path),         GAMES_DIR "/%s/bg.png",      g->name);
     snprintf(g->actor_decl_path, sizeof(g->actor_decl_path), GAMES_DIR "/%s/actor.txt",   g->name);
+    snprintf(g->layout_path,     sizeof(g->layout_path),     GAMES_DIR "/%s/layout.txt",  g->name);
+    snprintf(g->inventory_path,  sizeof(g->inventory_path),  GAMES_DIR "/%s/inventory.txt", g->name);
     snprintf(g->actor_base,      sizeof(g->actor_base),      GAMES_DIR "/%s/actors/%s",   g->name, g->actor_name);
     snprintf(g->actor_meta_path, sizeof(g->actor_meta_path), GAMES_DIR "/%s/actors/%s/sprites.txt",
              g->name, g->actor_name);
+}
+
+static int facing_from_str(const char *s) {
+    if (strcmp(s, "up") == 0)    return DIR_UP;
+    if (strcmp(s, "left") == 0)  return DIR_LEFT;
+    if (strcmp(s, "right") == 0) return DIR_RIGHT;
+    return DIR_DOWN;
+}
+
+static void game_spawn_actor(Game *g, const char *name, Vector2 pos, int facing, bool follows) {
+    if (g->actor_count >= MAX_ACTORS) return;
+    Actor *a = &g->actors[g->actor_count];
+    *a = (Actor){ 0 };
+    snprintf(a->name, sizeof(a->name), "%s", name);
+    a->pos = pos;
+    a->target = pos;
+    a->moving = false;
+    a->facing = facing;
+    a->pending_verb = VERB_LOOK;
+    a->pending_hotspot = NULL;
+    a->ai_follow = follows;
+    a->follow_target_idx = follows ? 0 : -1;
+    char base[192];
+    snprintf(base, sizeof(base), GAMES_DIR "/%s/actors/%s", g->name, name);
+    load_actor_anims(base, a->anims);
+    g->actor_count++;
+}
+
+static void game_load_npcs(Game *g) {
+    char path[192];
+    snprintf(path, sizeof(path), GAMES_DIR "/%s/npcs.txt", g->name);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\n' || *p == '\0' || *p == '#') continue;
+        char name[64], dir[16] = "down";
+        float x = 0, y = 0;
+        int got = sscanf(p, "%63s %f %f %15s", name, &x, &y, dir);
+        if (got < 3) continue;
+        game_spawn_actor(g, name, (Vector2){ x, y }, facing_from_str(dir), true);
+    }
+    fclose(f);
 }
 
 static void game_load(Game *g, const char *name) {
@@ -796,8 +895,14 @@ static void game_load(Game *g, const char *name) {
     g->dock_count = load_fg_list(g->walkbox_path, g->docks, MAX_WB_POLYS);
     if (g->dock_count <= 0) {
         g->dock_count = 1;
+        float margin = SCREEN_W * 0.02f;
         g->docks[0] = (Walkbox){
-            .p = { { 260, 320 }, { 680, 320 }, { 940, 540 }, { 20, 540 } },
+            .p = {
+                { SCREEN_W * 0.27f, PLAY_H * 0.60f },
+                { SCREEN_W * 0.71f, PLAY_H * 0.60f },
+                { SCREEN_W - margin, (float)PLAY_H },
+                { margin,            (float)PLAY_H },
+            },
             .n = 4,
         };
     }
@@ -807,13 +912,57 @@ static void game_load(Game *g, const char *name) {
     g->scale_cfg = default_scale_for_walkboxes(g->docks, g->dock_count);
     load_scale(g->scale_path, &g->scale_cfg);
 
-    load_actor_anims(g->actor_base, g->actor_anims);
+    g->inventory_count = load_inventory(g->inventory_path, g->inventory, MAX_INVENTORY);
+
+    g->actor_count = 0;
+    Vector2 player_spawn = { SCREEN_W / 2.0f, PLAY_H - 80 };
+    game_spawn_actor(g, g->actor_name, player_spawn, DIR_DOWN, false);
+    game_load_npcs(g);
+
+    float auth_w = (float)SCREEN_W, auth_h = (float)PLAY_H;
+    if (load_layout(g->layout_path, &auth_w, &auth_h)) {
+        if (auth_w > 0 && auth_h > 0 &&
+            (auth_w != (float)SCREEN_W || auth_h != (float)PLAY_H)) {
+            float sx = (float)SCREEN_W / auth_w;
+            float sy = (float)PLAY_H  / auth_h;
+            for (int k = 0; k < g->dock_count; k++)
+                for (int i = 0; i < g->docks[k].n; i++) {
+                    g->docks[k].p[i].x *= sx;
+                    g->docks[k].p[i].y *= sy;
+                }
+            for (int k = 0; k < g->fg_count; k++)
+                for (int i = 0; i < g->fgs[k].n; i++) {
+                    g->fgs[k].p[i].x *= sx;
+                    g->fgs[k].p[i].y *= sy;
+                }
+            for (int k = 0; k < g->hole_count; k++)
+                for (int i = 0; i < g->holes[k].n; i++) {
+                    g->holes[k].p[i].x *= sx;
+                    g->holes[k].p[i].y *= sy;
+                }
+            g->scale_cfg.y_top *= sy;
+            g->scale_cfg.y_bot *= sy;
+            for (int i = 1; i < g->actor_count; i++) {
+                g->actors[i].pos.x *= sx;
+                g->actors[i].pos.y *= sy;
+            }
+        }
+    }
+
+    for (int i = 0; i < g->actor_count; i++) {
+        g->actors[i].pos = clamp_to_walkable(g->actors[i].pos, g->docks, g->dock_count,
+                                             g->holes, g->hole_count);
+        g->actors[i].target = g->actors[i].pos;
+    }
 }
 
 static void game_unload(Game *g) {
     if (g->bg.id != 0) UnloadTexture(g->bg);
     g->bg = (Texture2D){ 0 };
-    unload_actor_anims(g->actor_anims);
+    for (int i = 0; i < g->actor_count; i++) {
+        unload_actor_anims(g->actors[i].anims);
+    }
+    g->actor_count = 0;
 }
 
 static int cmp_cstrs(const void *a, const void *b) {
@@ -849,6 +998,56 @@ static int game_find_index(char names[][64], int n, const char *name) {
     return -1;
 }
 
+static void draw_actor(Actor *a, const ScaleConfig *cfg, float dt) {
+    float s = actor_scale_at_y(a->pos.y, cfg);
+    int ax = (int)a->pos.x, ay = (int)a->pos.y;
+    int want;
+    if (a->moving) {
+        switch (a->facing) {
+            default:
+            case DIR_DOWN:  want = ANIM_WALK_DOWN;  break;
+            case DIR_UP:    want = ANIM_WALK_UP;    break;
+            case DIR_LEFT:  want = ANIM_WALK_LEFT;  break;
+            case DIR_RIGHT: want = ANIM_WALK_RIGHT; break;
+        }
+    } else {
+        switch (a->facing) {
+            default:
+            case DIR_DOWN:  want = ANIM_FACE_DOWN;  break;
+            case DIR_UP:    want = ANIM_FACE_UP;    break;
+            case DIR_LEFT:  want = ANIM_FACE_LEFT;  break;
+            case DIR_RIGHT: want = ANIM_FACE_RIGHT; break;
+        }
+    }
+    int play = resolve_anim(want, a->anims);
+    AnimTextures *ta = play >= 0 ? &a->anims[play] : NULL;
+    if (ta && ta->count > 0) {
+        if (a->moving) {
+            a->anim_timer += dt;
+            float step = 1.0f / ACTOR_ANIM_FPS;
+            while (a->anim_timer >= step) {
+                a->anim_timer -= step;
+                a->anim_frame = (a->anim_frame + 1) % ta->count;
+            }
+        } else {
+            a->anim_frame = 0;
+            a->anim_timer = 0;
+        }
+        if (a->anim_frame >= ta->count) a->anim_frame = 0;
+        Texture2D *tex = &ta->frames[a->anim_frame];
+        float w = tex->width * s * ACTOR_SPRITE_SCALE;
+        float h = tex->height * s * ACTOR_SPRITE_SCALE;
+        Rectangle src = { 0, 0, (float)tex->width, (float)tex->height };
+        Rectangle dst = { a->pos.x - w * 0.5f, a->pos.y - h, w, h };
+        DrawTexturePro(*tex, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
+    } else {
+        DrawCircle(ax, ay - (int)(30 * s), (int)(10 * s), (Color){ 240, 210, 180, 255 });
+        DrawRectangle(ax - (int)(8 * s), ay - (int)(20 * s), (int)(16 * s), (int)(25 * s), (Color){ 180, 60, 60, 255 });
+        DrawRectangle(ax - (int)(6 * s), ay + (int)(5 * s), (int)(5 * s), (int)(20 * s), (Color){ 40, 40, 90, 255 });
+        DrawRectangle(ax + (int)(1 * s), ay + (int)(5 * s), (int)(5 * s), (int)(20 * s), (Color){ 40, 40, 90, 255 });
+    }
+}
+
 int main(int argc, char **argv) {
     InitWindow(SCREEN_W, SCREEN_H, "scumm-game");
     SetTargetFPS(60);
@@ -865,23 +1064,13 @@ int main(int argc, char **argv) {
     Animation anims[ANIM_COUNT];
     load_anims_from_file(game.actor_meta_path, anims);
 
-    Actor actor = {
-        .pos = { SCREEN_W / 2.0f, PLAY_H - 80 },
-        .target = { SCREEN_W / 2.0f, PLAY_H - 80 },
-        .moving = false,
-        .facing = DIR_DOWN,
-        .anim_timer = 0,
-        .anim_frame = 0,
-        .pending_verb = VERB_LOOK,
-        .pending_hotspot = NULL,
-    };
-    actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
-    actor.target = actor.pos;
+    Actor *actor = &game.actors[0];
 
     char game_flash_text[96] = "";
     float game_flash = 0.0f;
     char game_names[MAX_GAMES][64];
     bool game_menu = false;
+    bool game_menu_initial = false;
     int  game_menu_idx = 0;
     int  game_menu_count = 0;
 
@@ -906,11 +1095,16 @@ int main(int argc, char **argv) {
     int browser_idx = 0;
 
     Rectangle verb_rects[VERB_COUNT];
-    int verb_w = 180, verb_h = 40, verb_pad = 12;
-    int verb_x = 20, verb_y = PLAY_H + 20;
+    int verb_w = 110, verb_h = 34, verb_pad_x = 8;
+    int verb_x = 20, verb_y = PLAY_H + 16;
     for (int i = 0; i < VERB_COUNT; i++) {
-        verb_rects[i] = (Rectangle){ verb_x, verb_y + i * (verb_h + verb_pad), verb_w, verb_h };
+        verb_rects[i] = (Rectangle){ verb_x + i * (verb_w + verb_pad_x), verb_y, verb_w, verb_h };
     }
+
+    game_menu_count = game_list(game_names, MAX_GAMES);
+    game_menu_idx = 0;
+    game_menu = true;
+    game_menu_initial = true;
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
@@ -1070,6 +1264,7 @@ int main(int argc, char **argv) {
             }
             if (IsKeyPressed(KEY_ESCAPE)) {
                 game_menu = false;
+                game_menu_initial = false;
             }
 
             int row_h = 36;
@@ -1095,17 +1290,18 @@ int main(int argc, char **argv) {
                     game_unload(&game);
                     game_load(&game, chosen);
                     load_anims_from_file(game.actor_meta_path, anims);
-                    actor.pos = (Vector2){ SCREEN_W / 2.0f, PLAY_H - 80 };
-                    actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count,
+                    actor->pos = (Vector2){ SCREEN_W / 2.0f, PLAY_H - 80 };
+                    actor->pos = clamp_to_walkable(actor->pos, game.docks, game.dock_count,
                                                   game.holes, game.hole_count);
-                    actor.target = actor.pos;
-                    actor.moving = false;
-                    actor.waypoint_count = 0;
+                    actor->target = actor->pos;
+                    actor->moving = false;
+                    actor->waypoint_count = 0;
                     snprintf(game_flash_text, sizeof(game_flash_text),
                              "Now playing: %s  (actor: %s)", game.name, game.actor_name);
                     game_flash = 2.0f;
                 }
                 game_menu = false;
+                game_menu_initial = false;
             }
 
             BeginDrawing();
@@ -1118,7 +1314,7 @@ int main(int argc, char **argv) {
             for (int i = 0; i < game_menu_count; i++) {
                 int y = start_y + i * row_h;
                 bool is_sel = (i == game_menu_idx);
-                bool is_cur = (strcmp(game_names[i], game.name) == 0);
+                bool is_cur = !game_menu_initial && (strcmp(game_names[i], game.name) == 0);
                 if (is_sel) {
                     DrawRectangle(row_x, y - 4, row_w, row_h - 4, (Color){ 60, 50, 20, 200 });
                     DrawRectangleLines(row_x, y - 4, row_w, row_h - 4, (Color){ 255, 220, 120, 220 });
@@ -1159,10 +1355,11 @@ int main(int argc, char **argv) {
                 bool ok_fg = save_fg_list(game.fg_path, game.fgs, game.fg_count);
                 bool ok_h  = save_fg_list(game.hole_path, game.holes, game.hole_count);
                 bool ok_s  = save_scale(game.scale_path, &game.scale_cfg);
+                save_layout(game.layout_path, (float)SCREEN_W, (float)PLAY_H);
                 if (ok_wb || ok_fg || ok_h || ok_s) save_flash = 1.5f;
-                actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
-                actor.target = actor.pos;
-                actor.moving = false;
+                actor->pos = clamp_to_walkable(actor->pos, game.docks, game.dock_count, game.holes, game.hole_count);
+                actor->target = actor->pos;
+                actor->moving = false;
             }
         }
         if (edit_mode && IsKeyPressed(KEY_W)) {
@@ -1259,6 +1456,7 @@ int main(int argc, char **argv) {
                 dragging_scale_line = -1;
             }
             if (IsKeyPressed(KEY_S)) {
+                save_layout(game.layout_path, (float)SCREEN_W, (float)PLAY_H);
                 if (save_scale(game.scale_path, &game.scale_cfg)) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
@@ -1298,6 +1496,7 @@ int main(int argc, char **argv) {
                 if (edit_target == EDIT_FG)        ok = save_fg_list(game.fg_path, game.fgs, game.fg_count);
                 else if (edit_target == EDIT_HOLE) ok = save_fg_list(game.hole_path, game.holes, game.hole_count);
                 else                               ok = save_fg_list(game.walkbox_path, game.docks, game.dock_count);
+                save_layout(game.layout_path, (float)SCREEN_W, (float)PLAY_H);
                 if (ok) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
@@ -1335,26 +1534,46 @@ int main(int argc, char **argv) {
                 }
             }
 
+            if (!clicked_verb) {
+                int inv_x0 = verb_x + VERB_COUNT * (verb_w + verb_pad_x) + 16;
+                int inv_w2 = 180, inv_h2 = 30, inv_cols = 3, inv_gap = 4;
+                for (int i = 0; i < game.inventory_count && i < 6; i++) {
+                    int cx = i % inv_cols, cy = i / inv_cols;
+                    Rectangle r = {
+                        (float)(inv_x0 + cx * (inv_w2 + inv_gap)),
+                        (float)(verb_y + cy * (inv_h2 + inv_gap)),
+                        (float)inv_w2, (float)inv_h2,
+                    };
+                    if (CheckCollisionPointRec(mouse, r)) {
+                        snprintf(message, sizeof(message), "%s %s",
+                                 verb_names[selected_verb], game.inventory[i]);
+                        message_timer = MESSAGE_TIME;
+                        clicked_verb = true;
+                        break;
+                    }
+                }
+            }
+
             if (!clicked_verb && mouse.y < PLAY_H) {
-                actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
+                actor->pos = clamp_to_walkable(actor->pos, game.docks, game.dock_count, game.holes, game.hole_count);
                 Vector2 final_target = clamp_to_walkable(mouse, game.docks, game.dock_count, game.holes, game.hole_count);
-                int nw = find_path_multi(actor.pos, final_target,
+                int nw = find_path_multi(actor->pos, final_target,
                                          game.docks, game.dock_count, game.holes, game.hole_count,
-                                         actor.waypoints, MAX_WB_VERTS + 2);
-                actor.pending_hotspot = hover;
-                actor.pending_verb = selected_verb;
+                                         actor->waypoints, MAX_WB_VERTS + 2);
+                actor->pending_hotspot = hover;
+                actor->pending_verb = selected_verb;
                 if (nw >= 2) {
-                    actor.waypoint_count = nw;
-                    actor.current_waypoint = 1;
-                    actor.target = actor.waypoints[1];
-                    actor.moving = true;
-                    update_actor_facing(&actor);
-                    actor.anim_frame = 0;
-                    actor.anim_timer = 0;
+                    actor->waypoint_count = nw;
+                    actor->current_waypoint = 1;
+                    actor->target = actor->waypoints[1];
+                    actor->moving = true;
+                    update_actor_facing(actor);
+                    actor->anim_frame = 0;
+                    actor->anim_timer = 0;
                 } else {
-                    actor.moving = false;
-                    actor.target = actor.pos;
-                    actor.waypoint_count = 0;
+                    actor->moving = false;
+                    actor->target = actor->pos;
+                    actor->waypoint_count = 0;
                 }
             }
         }
@@ -1365,57 +1584,94 @@ int main(int argc, char **argv) {
         pos_log_timer += dt;
         if (pos_log_timer >= PLAYER_POS_INTERVAL) {
             pos_log_timer = 0;
-            if ((int)actor.pos.x != (int)last_logged_pos.x ||
-                (int)actor.pos.y != (int)last_logged_pos.y) {
+            if ((int)actor->pos.x != (int)last_logged_pos.x ||
+                (int)actor->pos.y != (int)last_logged_pos.y) {
                 FILE *pf = fopen(PLAYER_POS_PATH, "w");
                 if (pf) {
-                    fprintf(pf, "%d %d\n", (int)actor.pos.x, (int)actor.pos.y);
+                    fprintf(pf, "%d %d\n", (int)actor->pos.x, (int)actor->pos.y);
                     fclose(pf);
-                    last_logged_pos = actor.pos;
+                    last_logged_pos = actor->pos;
                 }
             }
         }
 
-        if (actor.moving && !edit_mode) {
-            Vector2 d = { actor.target.x - actor.pos.x, actor.target.y - actor.pos.y };
-            float dist = sqrtf(d.x * d.x + d.y * d.y);
-            float step = ACTOR_SPEED * dt;
-            if (dist <= step) {
-                actor.pos = actor.target;
-                actor.current_waypoint++;
-                if (actor.current_waypoint < actor.waypoint_count) {
-                    actor.target = actor.waypoints[actor.current_waypoint];
-                    update_actor_facing(&actor);
-                } else {
-                    actor.moving = false;
-                    actor.waypoint_count = 0;
-
-                    if (actor.pending_hotspot) {
-                        Hotspot *h = actor.pending_hotspot;
-                        const char *txt = NULL;
-                        switch (actor.pending_verb) {
-                            case VERB_LOOK:   txt = h->look_text; break;
-                            case VERB_USE:    txt = h->use_text; break;
-                            case VERB_PICKUP: txt = h->pickup_text; break;
-                            default: break;
-                        }
-                        if (txt) {
-                            strncpy(message, txt, sizeof(message) - 1);
-                            message[sizeof(message) - 1] = '\0';
-                            message_timer = MESSAGE_TIME;
-                        }
-                        actor.pending_hotspot = NULL;
+        if (!edit_mode && !browser_mode) {
+            for (int ai = 1; ai < game.actor_count; ai++) {
+                Actor *n = &game.actors[ai];
+                if (!n->ai_follow || n->moving) continue;
+                if (n->follow_target_idx < 0 || n->follow_target_idx >= game.actor_count) continue;
+                Actor *tgt = &game.actors[n->follow_target_idx];
+                float ddx = tgt->pos.x - n->pos.x;
+                float ddy = tgt->pos.y - n->pos.y;
+                float d2 = ddx * ddx + ddy * ddy;
+                const float FOLLOW_TRIGGER = 120.0f;
+                const float FOLLOW_STOP    = 72.0f;
+                if (d2 > FOLLOW_TRIGGER * FOLLOW_TRIGGER) {
+                    float dist = sqrtf(d2);
+                    float ux = ddx / dist, uy = ddy / dist;
+                    Vector2 goal = { tgt->pos.x - ux * FOLLOW_STOP, tgt->pos.y - uy * FOLLOW_STOP };
+                    goal = clamp_to_walkable(goal, game.docks, game.dock_count,
+                                             game.holes, game.hole_count);
+                    int nw = find_path_multi(n->pos, goal,
+                                             game.docks, game.dock_count,
+                                             game.holes, game.hole_count,
+                                             n->waypoints, MAX_WB_VERTS + 2);
+                    if (nw >= 2) {
+                        n->waypoint_count = nw;
+                        n->current_waypoint = 1;
+                        n->target = n->waypoints[1];
+                        n->moving = true;
+                        update_actor_facing(n);
+                        n->anim_frame = 0;
+                        n->anim_timer = 0;
                     }
                 }
-            } else {
-                actor.pos.x += d.x / dist * step;
-                actor.pos.y += d.y / dist * step;
             }
-        } else if (!edit_mode && !browser_mode) {
-            Vector2 c = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
-            if (c.x != actor.pos.x || c.y != actor.pos.y) {
-                actor.pos = c;
-                actor.target = c;
+
+            for (int ai = 0; ai < game.actor_count; ai++) {
+                Actor *a = &game.actors[ai];
+                if (a->moving) {
+                    Vector2 d = { a->target.x - a->pos.x, a->target.y - a->pos.y };
+                    float dist = sqrtf(d.x * d.x + d.y * d.y);
+                    float step = ACTOR_SPEED * dt;
+                    if (dist <= step) {
+                        a->pos = a->target;
+                        a->current_waypoint++;
+                        if (a->current_waypoint < a->waypoint_count) {
+                            a->target = a->waypoints[a->current_waypoint];
+                            update_actor_facing(a);
+                        } else {
+                            a->moving = false;
+                            a->waypoint_count = 0;
+                            if (ai == 0 && a->pending_hotspot) {
+                                Hotspot *h = a->pending_hotspot;
+                                const char *txt = NULL;
+                                switch (a->pending_verb) {
+                                    case VERB_LOOK:   txt = h->look_text; break;
+                                    case VERB_USE:    txt = h->use_text; break;
+                                    case VERB_PICKUP: txt = h->pickup_text; break;
+                                    default: break;
+                                }
+                                if (txt) {
+                                    strncpy(message, txt, sizeof(message) - 1);
+                                    message[sizeof(message) - 1] = '\0';
+                                    message_timer = MESSAGE_TIME;
+                                }
+                                a->pending_hotspot = NULL;
+                            }
+                        }
+                    } else {
+                        a->pos.x += d.x / dist * step;
+                        a->pos.y += d.y / dist * step;
+                    }
+                } else {
+                    Vector2 c = clamp_to_walkable(a->pos, game.docks, game.dock_count,
+                                                  game.holes, game.hole_count);
+                    if (c.x != a->pos.x || c.y != a->pos.y) {
+                        a->pos = c;
+                        a->target = c;
+                    }
+                }
             }
         }
 
@@ -1438,59 +1694,25 @@ int main(int argc, char **argv) {
             DrawText(TextFormat("(missing %s)", game.bg_path), 20, 20, 20, RED);
         }
 
-        float s = actor_scale_at_y(actor.pos.y, &game.scale_cfg);
-        int ax = (int)actor.pos.x, ay = (int)actor.pos.y;
-
-        int want_anim;
-        if (actor.moving) {
-            switch (actor.facing) {
-                default:
-                case DIR_DOWN:  want_anim = ANIM_WALK_DOWN; break;
-                case DIR_UP:    want_anim = ANIM_WALK_UP; break;
-                case DIR_LEFT:  want_anim = ANIM_WALK_LEFT; break;
-                case DIR_RIGHT: want_anim = ANIM_WALK_RIGHT; break;
+        int draw_order[MAX_ACTORS];
+        for (int i = 0; i < game.actor_count; i++) draw_order[i] = i;
+        for (int i = 1; i < game.actor_count; i++) {
+            int key = draw_order[i];
+            float ky = game.actors[key].pos.y;
+            int j = i - 1;
+            while (j >= 0 && game.actors[draw_order[j]].pos.y > ky) {
+                draw_order[j + 1] = draw_order[j];
+                j--;
             }
-        } else {
-            switch (actor.facing) {
-                default:
-                case DIR_DOWN:  want_anim = ANIM_FACE_DOWN; break;
-                case DIR_UP:    want_anim = ANIM_FACE_UP; break;
-                case DIR_LEFT:  want_anim = ANIM_FACE_LEFT; break;
-                case DIR_RIGHT: want_anim = ANIM_FACE_RIGHT; break;
-            }
+            draw_order[j + 1] = key;
         }
-        int play_anim = resolve_anim(want_anim, game.actor_anims);
-        AnimTextures *ta = play_anim >= 0 ? &game.actor_anims[play_anim] : NULL;
-
-        if (ta && ta->count > 0) {
-            if (actor.moving) {
-                actor.anim_timer += dt;
-                float step = 1.0f / ACTOR_ANIM_FPS;
-                while (actor.anim_timer >= step) {
-                    actor.anim_timer -= step;
-                    actor.anim_frame = (actor.anim_frame + 1) % ta->count;
-                }
-            } else {
-                actor.anim_frame = 0;
-                actor.anim_timer = 0;
-            }
-            if (actor.anim_frame >= ta->count) actor.anim_frame = 0;
-            Texture2D *tex = &ta->frames[actor.anim_frame];
-            float w = tex->width * s * ACTOR_SPRITE_SCALE;
-            float h = tex->height * s * ACTOR_SPRITE_SCALE;
-            Rectangle src = { 0, 0, (float)tex->width, (float)tex->height };
-            Rectangle dst = { actor.pos.x - w * 0.5f, actor.pos.y - h, w, h };
-            DrawTexturePro(*tex, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
-        } else {
-            DrawCircle(ax, ay - (int)(30 * s), (int)(10 * s), (Color){ 240, 210, 180, 255 });
-            DrawRectangle(ax - (int)(8 * s), ay - (int)(20 * s), (int)(16 * s), (int)(25 * s), (Color){ 180, 60, 60, 255 });
-            DrawRectangle(ax - (int)(6 * s), ay + (int)(5 * s), (int)(5 * s), (int)(20 * s), (Color){ 40, 40, 90, 255 });
-            DrawRectangle(ax + (int)(1 * s), ay + (int)(5 * s), (int)(5 * s), (int)(20 * s), (Color){ 40, 40, 90, 255 });
+        for (int i = 0; i < game.actor_count; i++) {
+            draw_actor(&game.actors[draw_order[i]], &game.scale_cfg, dt);
         }
 
         if (!edit_mode) {
             for (int i = 0; i < game.fg_count; i++) {
-                draw_fg_polygon(game.bg, (float)SCREEN_W, (float)PLAY_H, &game.fgs[i], actor.pos.y);
+                draw_fg_polygon(game.bg, (float)SCREEN_W, (float)PLAY_H, &game.fgs[i], actor->pos.y);
             }
         }
 
@@ -1564,7 +1786,7 @@ int main(int argc, char **argv) {
                     }
                 }
             }
-            if (!edit_mode) DrawCircleV(actor.target, 4, RED);
+            if (!edit_mode) DrawCircleV(actor->target, 4, RED);
             if (edit_mode) {
                 bool scale_active = (edit_target == EDIT_SCALE);
                 unsigned char base_a = scale_active ? 220 : 90;
@@ -1606,7 +1828,7 @@ int main(int argc, char **argv) {
         }
 
         if (message[0]) {
-            int msg_y = (int)actor.pos.y - 70;
+            int msg_y = (int)actor->pos.y - 70;
             if (msg_y < 20) msg_y = 20;
             draw_wrapped_text(message, 20, msg_y, SCREEN_W - 40, 20, WHITE);
         }
@@ -1624,12 +1846,39 @@ int main(int argc, char **argv) {
                                      (Color){ 30, 30, 40, 255 };
             DrawRectangleRec(verb_rects[i], bg);
             DrawRectangleLinesEx(verb_rects[i], 1, (Color){ 120, 120, 140, 255 });
-            int tw = MeasureText(verb_names[i], 20);
+            int tw = MeasureText(verb_names[i], 16);
             DrawText(verb_names[i],
                      (int)(verb_rects[i].x + (verb_rects[i].width - tw) / 2),
-                     (int)(verb_rects[i].y + 10),
-                     20,
+                     (int)(verb_rects[i].y + 9),
+                     16,
                      is_selected ? YELLOW : WHITE);
+        }
+
+        {
+            int inv_x0 = verb_x + VERB_COUNT * (verb_w + verb_pad_x) + 16;
+            int inv_w2 = 180, inv_h2 = 30, inv_cols = 3, inv_gap = 4;
+            int max_visible = 6;
+            int extra = game.inventory_count - max_visible;
+            int shown = game.inventory_count < max_visible ? game.inventory_count : max_visible;
+            for (int i = 0; i < shown; i++) {
+                int cx = i % inv_cols, cy = i / inv_cols;
+                Rectangle r = {
+                    (float)(inv_x0 + cx * (inv_w2 + inv_gap)),
+                    (float)(verb_y + cy * (inv_h2 + inv_gap)),
+                    (float)inv_w2, (float)inv_h2,
+                };
+                bool hov = CheckCollisionPointRec(mouse, r);
+                Color bg = hov ? (Color){ 50, 50, 65, 255 } : (Color){ 28, 28, 36, 255 };
+                DrawRectangleRec(r, bg);
+                DrawRectangleLinesEx(r, 1, (Color){ 90, 90, 110, 255 });
+                DrawText(game.inventory[i], (int)r.x + 8, (int)r.y + 8, 16, WHITE);
+            }
+            if (extra > 0) {
+                char more[32];
+                snprintf(more, sizeof(more), "+%d more", extra);
+                DrawText(more, inv_x0, verb_y + 2 * (inv_h2 + inv_gap) + 2, 14,
+                         (Color){ 160, 160, 180, 255 });
+            }
         }
 
         if (edit_mode) {
@@ -1662,16 +1911,16 @@ int main(int argc, char **argv) {
                 head_col = (Color){ 255, 220, 100, 255 };
                 active_warn = &game.docks[editing_wb_idx];
             }
-            DrawText(edit_status, 230, PLAY_H + 30, 22, head_col);
-            DrawText(hint, 230, PLAY_H + 70, 14, (Color){ 180, 180, 200, 255 });
+            DrawText(edit_status, 20, PLAY_H + 74, 22, head_col);
+            DrawText(hint, 20, PLAY_H + 108, 14, (Color){ 180, 180, 200, 255 });
             if (active_warn && has_self_intersection(active_warn)) {
                 DrawText("(!) edges cross -- press [O] to auto-order",
                          230, PLAY_H + 55, 14, (Color){ 255, 130, 130, 255 });
             }
         } else {
-            DrawText(status_line, 230, PLAY_H + 30, 22, (Color){ 200, 200, 220, 255 });
+            DrawText(status_line, 20, PLAY_H + 74, 22, (Color){ 200, 200, 220, 255 });
             DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit  [B] sprite browser  [G] games",
-                     230, PLAY_H + 70, 14, (Color){ 140, 140, 160, 255 });
+                     20, PLAY_H + 108, 14, (Color){ 140, 140, 160, 255 });
         }
         if (save_flash > 0) {
             DrawText("saved", SCREEN_W - 100, PLAY_H + 20, 16,

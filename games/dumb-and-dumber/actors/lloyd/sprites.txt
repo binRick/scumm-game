@@ -1,0 +1,9 @@
+idle
+walk_down
+walk_up
+walk_left
+walk_right
+face_down
+face_up
+face_left
+face_right
