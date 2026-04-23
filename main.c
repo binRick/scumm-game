@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include "rlgl.h"
+#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,8 +62,10 @@ static void web_persist_file(const char *path) {
 #define MAX_FG_POLYS 16
 #define VERT_GRAB_RADIUS 10.0f
 #define EDGE_GRAB_RADIUS 12.0f
-#define ROOMS_DIR  "rooms"
-#define ACTORS_DIR "actors"
+#define GAMES_DIR "games"
+#define DEFAULT_GAME "monkey1"
+#define DEFAULT_ACTOR "guybrush"
+#define MAX_GAMES 64
 #define PLAYER_POS_PATH "player.txt"
 #define PLAYER_POS_INTERVAL 0.1f
 #define MAX_SPRITES 300
@@ -728,59 +731,139 @@ static void draw_wrapped_text(const char *text, int x, int y, int max_w, int fon
     if (*line_start) DrawText(line_start, x, line_y, font_size, color);
 }
 
-int main(void) {
-    InitWindow(SCREEN_W, SCREEN_H, "scumm-game");
-    SetTargetFPS(60);
+typedef struct {
+    char name[64];
+    char actor_name[64];
 
-    { FILE *pf = fopen(PLAYER_POS_PATH, "w"); if (pf) fclose(pf); }
+    Walkbox docks[MAX_WB_POLYS];  int dock_count;
+    Walkbox fgs[MAX_FG_POLYS];    int fg_count;
+    Walkbox holes[MAX_WB_POLYS];  int hole_count;
+    ScaleConfig scale_cfg;
 
-    const char *current_room  = "monkey1";
-    const char *current_actor = "guybrush";
+    Texture2D bg;
+    AnimTextures actor_anims[ANIM_COUNT];
 
-    char walkbox_path[128], fg_path[128], hole_path[128], scale_path[128];
-    char bg_path[128], actor_base[128], actor_meta_path[128];
-    snprintf(walkbox_path,    sizeof(walkbox_path),    ROOMS_DIR  "/%s/walkbox.txt", current_room);
-    snprintf(fg_path,         sizeof(fg_path),         ROOMS_DIR  "/%s/fg.txt",      current_room);
-    snprintf(hole_path,       sizeof(hole_path),       ROOMS_DIR  "/%s/holes.txt",   current_room);
-    snprintf(scale_path,      sizeof(scale_path),      ROOMS_DIR  "/%s/scale.txt",   current_room);
-    snprintf(bg_path,         sizeof(bg_path),         ROOMS_DIR  "/%s/bg.png",      current_room);
-    snprintf(actor_base,      sizeof(actor_base),      ACTORS_DIR "/%s",             current_actor);
-    snprintf(actor_meta_path, sizeof(actor_meta_path), ACTORS_DIR "/%s/sprites.txt", current_actor);
+    char walkbox_path[160];
+    char fg_path[160];
+    char hole_path[160];
+    char scale_path[160];
+    char bg_path[160];
+    char actor_base[160];
+    char actor_meta_path[160];
+    char actor_decl_path[160];
+} Game;
 
-    Texture2D bg = LoadTexture(bg_path);
+static void game_read_actor_decl(const char *game_name, char *out, size_t cap) {
+    char path[160];
+    snprintf(path, sizeof(path), GAMES_DIR "/%s/actor.txt", game_name);
+    FILE *f = fopen(path, "r");
+    if (!f) { snprintf(out, cap, "%s", DEFAULT_ACTOR); return; }
+    char buf[64] = { 0 };
+    if (!fgets(buf, sizeof(buf), f)) { snprintf(out, cap, "%s", DEFAULT_ACTOR); fclose(f); return; }
+    fclose(f);
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ')) buf[--n] = 0;
+    if (n == 0) snprintf(out, cap, "%s", DEFAULT_ACTOR);
+    else        snprintf(out, cap, "%s", buf);
+}
 
-    web_restore_file(walkbox_path);
-    web_restore_file(fg_path);
-    web_restore_file(hole_path);
-    web_restore_file(scale_path);
-    web_restore_file(actor_meta_path);
+static void game_build_paths(Game *g) {
+    snprintf(g->walkbox_path,    sizeof(g->walkbox_path),    GAMES_DIR "/%s/walkbox.txt", g->name);
+    snprintf(g->fg_path,         sizeof(g->fg_path),         GAMES_DIR "/%s/fg.txt",      g->name);
+    snprintf(g->hole_path,       sizeof(g->hole_path),       GAMES_DIR "/%s/holes.txt",   g->name);
+    snprintf(g->scale_path,      sizeof(g->scale_path),      GAMES_DIR "/%s/scale.txt",   g->name);
+    snprintf(g->bg_path,         sizeof(g->bg_path),         GAMES_DIR "/%s/bg.png",      g->name);
+    snprintf(g->actor_decl_path, sizeof(g->actor_decl_path), GAMES_DIR "/%s/actor.txt",   g->name);
+    snprintf(g->actor_base,      sizeof(g->actor_base),      GAMES_DIR "/%s/actors/%s",   g->name, g->actor_name);
+    snprintf(g->actor_meta_path, sizeof(g->actor_meta_path), GAMES_DIR "/%s/actors/%s/sprites.txt",
+             g->name, g->actor_name);
+}
 
-    Walkbox docks[MAX_WB_POLYS] = { 0 };
-    int dock_count = load_fg_list(walkbox_path, docks, MAX_WB_POLYS);
-    if (dock_count <= 0) {
-        dock_count = 1;
-        docks[0] = (Walkbox){
+static void game_load(Game *g, const char *name) {
+    memset(g, 0, sizeof(*g));
+    snprintf(g->name, sizeof(g->name), "%s", name);
+    game_read_actor_decl(g->name, g->actor_name, sizeof(g->actor_name));
+    game_build_paths(g);
+
+    web_restore_file(g->walkbox_path);
+    web_restore_file(g->fg_path);
+    web_restore_file(g->hole_path);
+    web_restore_file(g->scale_path);
+    web_restore_file(g->actor_meta_path);
+
+    g->bg = LoadTexture(g->bg_path);
+
+    g->dock_count = load_fg_list(g->walkbox_path, g->docks, MAX_WB_POLYS);
+    if (g->dock_count <= 0) {
+        g->dock_count = 1;
+        g->docks[0] = (Walkbox){
             .p = { { 260, 320 }, { 680, 320 }, { 940, 540 }, { 20, 540 } },
             .n = 4,
         };
     }
 
-    Walkbox holes[MAX_WB_POLYS] = { 0 };
-    int hole_count = load_fg_list(hole_path, holes, MAX_WB_POLYS);
+    g->fg_count = load_fg_list(g->fg_path, g->fgs, MAX_FG_POLYS);
+    g->hole_count = load_fg_list(g->hole_path, g->holes, MAX_WB_POLYS);
+    g->scale_cfg = default_scale_for_walkboxes(g->docks, g->dock_count);
+    load_scale(g->scale_path, &g->scale_cfg);
 
-    ScaleConfig scale_cfg = default_scale_for_walkboxes(docks, dock_count);
-    load_scale(scale_path, &scale_cfg);
+    load_actor_anims(g->actor_base, g->actor_anims);
+}
 
-    Walkbox fgs[MAX_FG_POLYS] = { 0 };
-    int fg_count = load_fg_list(fg_path, fgs, MAX_FG_POLYS);
+static void game_unload(Game *g) {
+    if (g->bg.id != 0) UnloadTexture(g->bg);
+    g->bg = (Texture2D){ 0 };
+    unload_actor_anims(g->actor_anims);
+}
+
+static int cmp_cstrs(const void *a, const void *b) {
+    return strcmp(*(const char * const *)a, *(const char * const *)b);
+}
+
+static int game_list(char out[][64], int max) {
+    DIR *d = opendir(GAMES_DIR);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while (n < max && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char path[192];
+        snprintf(path, sizeof(path), GAMES_DIR "/%s", e->d_name);
+        DIR *sub = opendir(path);
+        if (!sub) continue;
+        closedir(sub);
+        snprintf(out[n++], 64, "%s", e->d_name);
+    }
+    closedir(d);
+    const char *ptrs[MAX_GAMES];
+    for (int i = 0; i < n; i++) ptrs[i] = out[i];
+    qsort(ptrs, n, sizeof(ptrs[0]), cmp_cstrs);
+    char tmp[MAX_GAMES][64];
+    for (int i = 0; i < n; i++) snprintf(tmp[i], 64, "%s", ptrs[i]);
+    for (int i = 0; i < n; i++) snprintf(out[i], 64, "%s", tmp[i]);
+    return n;
+}
+
+static int game_find_index(char names[][64], int n, const char *name) {
+    for (int i = 0; i < n; i++) if (strcmp(names[i], name) == 0) return i;
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    InitWindow(SCREEN_W, SCREEN_H, "scumm-game");
+    SetTargetFPS(60);
+
+    { FILE *pf = fopen(PLAYER_POS_PATH, "w"); if (pf) fclose(pf); }
+
+    const char *start_game = (argc > 1) ? argv[1] : DEFAULT_GAME;
+
+    Game game;
+    game_load(&game, start_game);
 
     Texture2D sprites[MAX_SPRITES];
     int sprite_count = load_sprites_from_dir(SPRITES_DIR, sprites, MAX_SPRITES);
     Animation anims[ANIM_COUNT];
-    load_anims_from_file(actor_meta_path, anims);
-
-    AnimTextures actor_anims[ANIM_COUNT];
-    load_actor_anims(actor_base, actor_anims);
+    load_anims_from_file(game.actor_meta_path, anims);
 
     Actor actor = {
         .pos = { SCREEN_W / 2.0f, PLAY_H - 80 },
@@ -792,8 +875,12 @@ int main(void) {
         .pending_verb = VERB_LOOK,
         .pending_hotspot = NULL,
     };
-    actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
+    actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
     actor.target = actor.pos;
+
+    char game_flash_text[96] = "";
+    float game_flash = 0.0f;
+    char game_names[MAX_GAMES][64];
 
     Verb selected_verb = VERB_LOOK;
     char message[256] = "";
@@ -853,7 +940,7 @@ int main(void) {
         if (IsKeyPressed(KEY_B) && !edit_mode) {
             browser_mode = !browser_mode;
             if (!browser_mode) {
-                if (save_anims_to_file(actor_meta_path, anims)) save_flash = 1.5f;
+                if (save_anims_to_file(game.actor_meta_path, anims)) save_flash = 1.5f;
             }
         }
 
@@ -893,7 +980,7 @@ int main(void) {
                 }
 
                 if (IsKeyPressed(KEY_S)) {
-                    if (save_anims_to_file(actor_meta_path, anims)) save_flash = 1.5f;
+                    if (save_anims_to_file(game.actor_meta_path, anims)) save_flash = 1.5f;
                 }
             }
             if (save_flash > 0) save_flash -= dt;
@@ -976,12 +1063,12 @@ int main(void) {
             edit_cam.target = (Vector2){ 0, 0 };
             edit_cam.offset = (Vector2){ 0, 0 };
             if (!edit_mode) {
-                bool ok_wb = save_fg_list(walkbox_path, docks, dock_count);
-                bool ok_fg = save_fg_list(fg_path, fgs, fg_count);
-                bool ok_h  = save_fg_list(hole_path, holes, hole_count);
-                bool ok_s  = save_scale(scale_path, &scale_cfg);
+                bool ok_wb = save_fg_list(game.walkbox_path, game.docks, game.dock_count);
+                bool ok_fg = save_fg_list(game.fg_path, game.fgs, game.fg_count);
+                bool ok_h  = save_fg_list(game.hole_path, game.holes, game.hole_count);
+                bool ok_s  = save_scale(game.scale_path, &game.scale_cfg);
                 if (ok_wb || ok_fg || ok_h || ok_s) save_flash = 1.5f;
-                actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
+                actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
                 actor.target = actor.pos;
                 actor.moving = false;
             }
@@ -989,30 +1076,30 @@ int main(void) {
         if (edit_mode && IsKeyPressed(KEY_W)) {
             dragging_vert = -1;
             if (edit_target == EDIT_WB) {
-                if (dock_count > 1) editing_wb_idx = (editing_wb_idx + 1) % dock_count;
+                if (game.dock_count > 1) editing_wb_idx = (editing_wb_idx + 1) % game.dock_count;
             } else {
                 edit_target = EDIT_WB;
-                if (editing_wb_idx >= dock_count) editing_wb_idx = 0;
+                if (editing_wb_idx >= game.dock_count) editing_wb_idx = 0;
             }
         }
         if (edit_mode && IsKeyPressed(KEY_F)) {
             dragging_vert = -1;
             if (edit_target == EDIT_FG) {
-                if (fg_count > 1) editing_fg_idx = (editing_fg_idx + 1) % fg_count;
+                if (game.fg_count > 1) editing_fg_idx = (editing_fg_idx + 1) % game.fg_count;
             } else {
                 edit_target = EDIT_FG;
-                if (fg_count == 0) { fg_count = 1; fgs[0].n = 0; }
-                if (editing_fg_idx >= fg_count) editing_fg_idx = 0;
+                if (game.fg_count == 0) { game.fg_count = 1; game.fgs[0].n = 0; }
+                if (editing_fg_idx >= game.fg_count) editing_fg_idx = 0;
             }
         }
         if (edit_mode && IsKeyPressed(KEY_H)) {
             dragging_vert = -1;
             if (edit_target == EDIT_HOLE) {
-                if (hole_count > 1) editing_hole_idx = (editing_hole_idx + 1) % hole_count;
+                if (game.hole_count > 1) editing_hole_idx = (editing_hole_idx + 1) % game.hole_count;
             } else {
                 edit_target = EDIT_HOLE;
-                if (hole_count == 0) { hole_count = 1; holes[0].n = 0; }
-                if (editing_hole_idx >= hole_count) editing_hole_idx = 0;
+                if (game.hole_count == 0) { game.hole_count = 1; game.holes[0].n = 0; }
+                if (editing_hole_idx >= game.hole_count) editing_hole_idx = 0;
             }
         }
         if (edit_mode && IsKeyPressed(KEY_K)) {
@@ -1020,42 +1107,66 @@ int main(void) {
             dragging_scale_line = -1;
             edit_target = EDIT_SCALE;
         }
+        if (!edit_mode && !browser_mode && IsKeyPressed(KEY_G)) {
+            int gn = game_list(game_names, MAX_GAMES);
+            if (gn > 1) {
+                int cur = game_find_index(game_names, gn, game.name);
+                int next = (cur < 0) ? 0 : (cur + 1) % gn;
+                char next_name[64];
+                snprintf(next_name, sizeof(next_name), "%s", game_names[next]);
+                game_unload(&game);
+                game_load(&game, next_name);
+                load_anims_from_file(game.actor_meta_path, anims);
+                actor.pos = (Vector2){ SCREEN_W / 2.0f, PLAY_H - 80 };
+                actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count,
+                                              game.holes, game.hole_count);
+                actor.target = actor.pos;
+                actor.moving = false;
+                actor.waypoint_count = 0;
+                snprintf(game_flash_text, sizeof(game_flash_text),
+                         "Now playing: %s  (actor: %s)", game.name, game.actor_name);
+                game_flash = 2.0f;
+            } else {
+                snprintf(game_flash_text, sizeof(game_flash_text), "Only one game: %s", game.name);
+                game_flash = 1.5f;
+            }
+        }
         if (edit_mode && IsKeyPressed(KEY_N)) {
-            if (edit_target == EDIT_FG && fg_count < MAX_FG_POLYS) {
-                fgs[fg_count].n = 0;
-                editing_fg_idx = fg_count;
-                fg_count++;
+            if (edit_target == EDIT_FG && game.fg_count < MAX_FG_POLYS) {
+                game.fgs[game.fg_count].n = 0;
+                editing_fg_idx = game.fg_count;
+                game.fg_count++;
                 dragging_vert = -1;
-            } else if (edit_target == EDIT_WB && dock_count < MAX_WB_POLYS) {
-                docks[dock_count].n = 0;
-                editing_wb_idx = dock_count;
-                dock_count++;
+            } else if (edit_target == EDIT_WB && game.dock_count < MAX_WB_POLYS) {
+                game.docks[game.dock_count].n = 0;
+                editing_wb_idx = game.dock_count;
+                game.dock_count++;
                 dragging_vert = -1;
-            } else if (edit_target == EDIT_HOLE && hole_count < MAX_WB_POLYS) {
-                holes[hole_count].n = 0;
-                editing_hole_idx = hole_count;
-                hole_count++;
+            } else if (edit_target == EDIT_HOLE && game.hole_count < MAX_WB_POLYS) {
+                game.holes[game.hole_count].n = 0;
+                editing_hole_idx = game.hole_count;
+                game.hole_count++;
                 dragging_vert = -1;
             }
         }
         if (edit_mode && IsKeyPressed(KEY_BACKSPACE)) {
-            if (edit_target == EDIT_FG && fg_count > 0) {
-                for (int i = editing_fg_idx; i < fg_count - 1; i++) fgs[i] = fgs[i + 1];
-                fg_count--;
-                if (fg_count == 0) { fg_count = 1; fgs[0].n = 0; editing_fg_idx = 0; }
-                else if (editing_fg_idx >= fg_count) editing_fg_idx = fg_count - 1;
+            if (edit_target == EDIT_FG && game.fg_count > 0) {
+                for (int i = editing_fg_idx; i < game.fg_count - 1; i++) game.fgs[i] = game.fgs[i + 1];
+                game.fg_count--;
+                if (game.fg_count == 0) { game.fg_count = 1; game.fgs[0].n = 0; editing_fg_idx = 0; }
+                else if (editing_fg_idx >= game.fg_count) editing_fg_idx = game.fg_count - 1;
                 dragging_vert = -1;
-            } else if (edit_target == EDIT_WB && dock_count > 0) {
-                for (int i = editing_wb_idx; i < dock_count - 1; i++) docks[i] = docks[i + 1];
-                dock_count--;
-                if (dock_count == 0) { dock_count = 1; docks[0].n = 0; editing_wb_idx = 0; }
-                else if (editing_wb_idx >= dock_count) editing_wb_idx = dock_count - 1;
+            } else if (edit_target == EDIT_WB && game.dock_count > 0) {
+                for (int i = editing_wb_idx; i < game.dock_count - 1; i++) game.docks[i] = game.docks[i + 1];
+                game.dock_count--;
+                if (game.dock_count == 0) { game.dock_count = 1; game.docks[0].n = 0; editing_wb_idx = 0; }
+                else if (editing_wb_idx >= game.dock_count) editing_wb_idx = game.dock_count - 1;
                 dragging_vert = -1;
-            } else if (edit_target == EDIT_HOLE && hole_count > 0) {
-                for (int i = editing_hole_idx; i < hole_count - 1; i++) holes[i] = holes[i + 1];
-                hole_count--;
-                if (hole_count == 0) { hole_count = 1; holes[0].n = 0; editing_hole_idx = 0; }
-                else if (editing_hole_idx >= hole_count) editing_hole_idx = hole_count - 1;
+            } else if (edit_target == EDIT_HOLE && game.hole_count > 0) {
+                for (int i = editing_hole_idx; i < game.hole_count - 1; i++) game.holes[i] = game.holes[i + 1];
+                game.hole_count--;
+                if (game.hole_count == 0) { game.hole_count = 1; game.holes[0].n = 0; editing_hole_idx = 0; }
+                else if (editing_hole_idx >= game.hole_count) editing_hole_idx = game.hole_count - 1;
                 dragging_vert = -1;
             }
         }
@@ -1070,15 +1181,15 @@ int main(void) {
 
         if (edit_mode && edit_target == EDIT_SCALE) {
             if (IsKeyPressed(KEY_R)) {
-                scale_cfg = default_scale_for_walkboxes(docks, dock_count);
+                game.scale_cfg = default_scale_for_walkboxes(game.docks, game.dock_count);
                 dragging_scale_line = -1;
             }
             if (IsKeyPressed(KEY_S)) {
-                if (save_scale(scale_path, &scale_cfg)) save_flash = 1.5f;
+                if (save_scale(game.scale_path, &game.scale_cfg)) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
-                float d_top = fabsf(mouse.y - scale_cfg.y_top);
-                float d_bot = fabsf(mouse.y - scale_cfg.y_bot);
+                float d_top = fabsf(mouse.y - game.scale_cfg.y_top);
+                float d_bot = fabsf(mouse.y - game.scale_cfg.y_bot);
                 int nearest = (d_top < d_bot) ? 0 : 1;
                 if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     dragging_scale_line = nearest;
@@ -1087,15 +1198,15 @@ int main(void) {
                     float y = mouse.y;
                     if (y < 0) y = 0;
                     if (y > PLAY_H) y = (float)PLAY_H;
-                    if (dragging_scale_line == 0) scale_cfg.y_top = y;
-                    else                          scale_cfg.y_bot = y;
+                    if (dragging_scale_line == 0) game.scale_cfg.y_top = y;
+                    else                          game.scale_cfg.y_bot = y;
                 }
                 if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) dragging_scale_line = -1;
                 bool up   = IsKeyPressed(KEY_UP)   || IsKeyPressedRepeat(KEY_UP);
                 bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN);
                 if (up || down) {
                     float delta = up ? 0.02f : -0.02f;
-                    float *s = (nearest == 0) ? &scale_cfg.s_top : &scale_cfg.s_bot;
+                    float *s = (nearest == 0) ? &game.scale_cfg.s_top : &game.scale_cfg.s_bot;
                     *s += delta;
                     if (*s < 0.05f) *s = 0.05f;
                     if (*s > 3.0f)  *s = 3.0f;
@@ -1103,16 +1214,16 @@ int main(void) {
             }
         } else if (edit_mode) {
             Walkbox *active;
-            if (edit_target == EDIT_FG)        active = &fgs[editing_fg_idx];
-            else if (edit_target == EDIT_HOLE) active = &holes[editing_hole_idx];
-            else                               active = &docks[editing_wb_idx];
+            if (edit_target == EDIT_FG)        active = &game.fgs[editing_fg_idx];
+            else if (edit_target == EDIT_HOLE) active = &game.holes[editing_hole_idx];
+            else                               active = &game.docks[editing_wb_idx];
             if (IsKeyPressed(KEY_R)) { active->n = 0; dragging_vert = -1; }
             if (IsKeyPressed(KEY_O)) { sort_poly_by_centroid(active); dragging_vert = -1; }
             if (IsKeyPressed(KEY_S)) {
                 bool ok;
-                if (edit_target == EDIT_FG)        ok = save_fg_list(fg_path, fgs, fg_count);
-                else if (edit_target == EDIT_HOLE) ok = save_fg_list(hole_path, holes, hole_count);
-                else                               ok = save_fg_list(walkbox_path, docks, dock_count);
+                if (edit_target == EDIT_FG)        ok = save_fg_list(game.fg_path, game.fgs, game.fg_count);
+                else if (edit_target == EDIT_HOLE) ok = save_fg_list(game.hole_path, game.holes, game.hole_count);
+                else                               ok = save_fg_list(game.walkbox_path, game.docks, game.dock_count);
                 if (ok) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
@@ -1151,10 +1262,10 @@ int main(void) {
             }
 
             if (!clicked_verb && mouse.y < PLAY_H) {
-                actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
-                Vector2 final_target = clamp_to_walkable(mouse, docks, dock_count, holes, hole_count);
+                actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
+                Vector2 final_target = clamp_to_walkable(mouse, game.docks, game.dock_count, game.holes, game.hole_count);
                 int nw = find_path_multi(actor.pos, final_target,
-                                         docks, dock_count, holes, hole_count,
+                                         game.docks, game.dock_count, game.holes, game.hole_count,
                                          actor.waypoints, MAX_WB_VERTS + 2);
                 actor.pending_hotspot = hover;
                 actor.pending_verb = selected_verb;
@@ -1175,6 +1286,7 @@ int main(void) {
         }
 
         if (save_flash > 0) save_flash -= dt;
+        if (game_flash > 0) game_flash -= dt;
 
         pos_log_timer += dt;
         if (pos_log_timer >= PLAYER_POS_INTERVAL) {
@@ -1226,7 +1338,7 @@ int main(void) {
                 actor.pos.y += d.y / dist * step;
             }
         } else if (!edit_mode && !browser_mode) {
-            Vector2 c = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
+            Vector2 c = clamp_to_walkable(actor.pos, game.docks, game.dock_count, game.holes, game.hole_count);
             if (c.x != actor.pos.x || c.y != actor.pos.y) {
                 actor.pos = c;
                 actor.target = c;
@@ -1243,16 +1355,16 @@ int main(void) {
 
         if (edit_mode) BeginMode2D(edit_cam);
 
-        if (bg.id != 0) {
-            Rectangle src = { 0, 0, (float)bg.width, (float)bg.height };
+        if (game.bg.id != 0) {
+            Rectangle src = { 0, 0, (float)game.bg.width, (float)game.bg.height };
             Rectangle dst = { 0, 0, SCREEN_W, PLAY_H };
-            DrawTexturePro(bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
+            DrawTexturePro(game.bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
         } else {
             DrawRectangle(0, 0, SCREEN_W, PLAY_H, (Color){ 40, 50, 80, 255 });
-            DrawText(TextFormat("(missing %s)", bg_path), 20, 20, 20, RED);
+            DrawText(TextFormat("(missing %s)", game.bg_path), 20, 20, 20, RED);
         }
 
-        float s = actor_scale_at_y(actor.pos.y, &scale_cfg);
+        float s = actor_scale_at_y(actor.pos.y, &game.scale_cfg);
         int ax = (int)actor.pos.x, ay = (int)actor.pos.y;
 
         int want_anim;
@@ -1273,8 +1385,8 @@ int main(void) {
                 case DIR_RIGHT: want_anim = ANIM_FACE_RIGHT; break;
             }
         }
-        int play_anim = resolve_anim(want_anim, actor_anims);
-        AnimTextures *ta = play_anim >= 0 ? &actor_anims[play_anim] : NULL;
+        int play_anim = resolve_anim(want_anim, game.actor_anims);
+        AnimTextures *ta = play_anim >= 0 ? &game.actor_anims[play_anim] : NULL;
 
         if (ta && ta->count > 0) {
             if (actor.moving) {
@@ -1303,14 +1415,14 @@ int main(void) {
         }
 
         if (!edit_mode) {
-            for (int i = 0; i < fg_count; i++) {
-                draw_fg_polygon(bg, (float)SCREEN_W, (float)PLAY_H, &fgs[i], actor.pos.y);
+            for (int i = 0; i < game.fg_count; i++) {
+                draw_fg_polygon(game.bg, (float)SCREEN_W, (float)PLAY_H, &game.fgs[i], actor.pos.y);
             }
         }
 
         if (debug_overlay) {
-            for (int i = 0; i < fg_count; i++) {
-                draw_fg_debug_fill(&fgs[i], (Color){ 255, 0, 255, 90 });
+            for (int i = 0; i < game.fg_count; i++) {
+                draw_fg_debug_fill(&game.fgs[i], (Color){ 255, 0, 255, 90 });
             }
         }
 
@@ -1321,8 +1433,8 @@ int main(void) {
             Color fg_vert = { 255, 100, 220, 255 };
             Color hole_edge = { 255, 140, 40, 230 };
             Color hole_vert = { 255, 140, 40, 255 };
-            for (int pi = 0; pi < dock_count; pi++) {
-                const Walkbox *wb = &docks[pi];
+            for (int pi = 0; pi < game.dock_count; pi++) {
+                const Walkbox *wb = &game.docks[pi];
                 bool is_active = edit_mode && edit_target == EDIT_WB && pi == editing_wb_idx;
                 Color we = wb_edge, wv = wb_vert;
                 if (edit_mode && !is_active) { we.a = 100; wv.a = 140; }
@@ -1340,8 +1452,8 @@ int main(void) {
                     }
                 }
             }
-            for (int pi = 0; pi < fg_count; pi++) {
-                const Walkbox *wb = &fgs[pi];
+            for (int pi = 0; pi < game.fg_count; pi++) {
+                const Walkbox *wb = &game.fgs[pi];
                 bool is_active = edit_mode && edit_target == EDIT_FG && pi == editing_fg_idx;
                 Color ec = fg_edge, vc = fg_vert;
                 if (edit_mode && !is_active) { ec.a = 80; vc.a = 120; }
@@ -1359,8 +1471,8 @@ int main(void) {
                     }
                 }
             }
-            for (int pi = 0; pi < hole_count; pi++) {
-                const Walkbox *wb = &holes[pi];
+            for (int pi = 0; pi < game.hole_count; pi++) {
+                const Walkbox *wb = &game.holes[pi];
                 bool is_active = edit_mode && edit_target == EDIT_HOLE && pi == editing_hole_idx;
                 Color ec = hole_edge, vc = hole_vert;
                 if (edit_mode && !is_active) { ec.a = 100; vc.a = 140; }
@@ -1383,12 +1495,12 @@ int main(void) {
                 bool scale_active = (edit_target == EDIT_SCALE);
                 unsigned char base_a = scale_active ? 220 : 90;
                 unsigned char near_a = scale_active ? 255 : 130;
-                float d_top = fabsf(mouse.y - scale_cfg.y_top);
-                float d_bot = fabsf(mouse.y - scale_cfg.y_bot);
+                float d_top = fabsf(mouse.y - game.scale_cfg.y_top);
+                float d_bot = fabsf(mouse.y - game.scale_cfg.y_bot);
                 int hot = scale_active ? ((d_top < d_bot) ? 0 : 1) : -1;
                 for (int k = 0; k < 2; k++) {
-                    float y = (k == 0) ? scale_cfg.y_top : scale_cfg.y_bot;
-                    float sv = (k == 0) ? scale_cfg.s_top : scale_cfg.s_bot;
+                    float y = (k == 0) ? game.scale_cfg.y_top : game.scale_cfg.y_bot;
+                    float sv = (k == 0) ? game.scale_cfg.s_top : game.scale_cfg.s_bot;
                     bool hot_line = (hot == k);
                     unsigned char a = hot_line ? near_a : base_a;
                     Color c = { 255, 220, 80, a };
@@ -1402,9 +1514,9 @@ int main(void) {
             }
             if (edit_mode && edit_target != EDIT_SCALE && dragging_vert < 0 && mouse.y < PLAY_H) {
                 Walkbox *active;
-                if (edit_target == EDIT_FG)        active = &fgs[editing_fg_idx];
-                else if (edit_target == EDIT_HOLE) active = &holes[editing_hole_idx];
-                else                               active = &docks[editing_wb_idx];
+                if (edit_target == EDIT_FG)        active = &game.fgs[editing_fg_idx];
+                else if (edit_target == EDIT_HOLE) active = &game.holes[editing_hole_idx];
+                else                               active = &game.docks[editing_wb_idx];
                 int near_v = nearest_vertex(mouse, active, VERT_GRAB_RADIUS);
                 if (near_v >= 0) {
                     DrawCircleLines((int)active->p[near_v].x, (int)active->p[near_v].y, 10, YELLOW);
@@ -1454,27 +1566,27 @@ int main(void) {
                 "[W]/[F]/[H]/[K] wb/fg/hole/scale  [N] new  [Bksp] delete  [O] auto-order  [R] reset  [S] save  [E] exit";
             if (edit_target == EDIT_FG) {
                 snprintf(edit_status, sizeof(edit_status), "EDIT FOREGROUND #%d/%d  verts: %d",
-                         editing_fg_idx + 1, fg_count, fgs[editing_fg_idx].n);
+                         editing_fg_idx + 1, game.fg_count, game.fgs[editing_fg_idx].n);
                 head_col = (Color){ 255, 180, 230, 255 };
-                active_warn = &fgs[editing_fg_idx];
+                active_warn = &game.fgs[editing_fg_idx];
             } else if (edit_target == EDIT_HOLE) {
                 snprintf(edit_status, sizeof(edit_status), "EDIT HOLE #%d/%d  verts: %d",
-                         editing_hole_idx + 1, hole_count,
-                         hole_count > 0 ? holes[editing_hole_idx].n : 0);
+                         editing_hole_idx + 1, game.hole_count,
+                         game.hole_count > 0 ? game.holes[editing_hole_idx].n : 0);
                 head_col = (Color){ 255, 180, 80, 255 };
-                active_warn = hole_count > 0 ? &holes[editing_hole_idx] : NULL;
+                active_warn = game.hole_count > 0 ? &game.holes[editing_hole_idx] : NULL;
             } else if (edit_target == EDIT_SCALE) {
                 snprintf(edit_status, sizeof(edit_status),
                          "EDIT SCALE  TOP y=%d s=%.2f   BOT y=%d s=%.2f",
-                         (int)scale_cfg.y_top, scale_cfg.s_top,
-                         (int)scale_cfg.y_bot, scale_cfg.s_bot);
+                         (int)game.scale_cfg.y_top, game.scale_cfg.s_top,
+                         (int)game.scale_cfg.y_bot, game.scale_cfg.s_bot);
                 head_col = (Color){ 255, 220, 80, 255 };
                 hint = "[drag] move line  [Up/Down] scale +/-  [R] reset to walkbox extent  [S] save  [E] exit";
             } else {
                 snprintf(edit_status, sizeof(edit_status), "EDIT WALKBOX #%d/%d  verts: %d",
-                         editing_wb_idx + 1, dock_count, docks[editing_wb_idx].n);
+                         editing_wb_idx + 1, game.dock_count, game.docks[editing_wb_idx].n);
                 head_col = (Color){ 255, 220, 100, 255 };
-                active_warn = &docks[editing_wb_idx];
+                active_warn = &game.docks[editing_wb_idx];
             }
             DrawText(edit_status, 230, PLAY_H + 30, 22, head_col);
             DrawText(hint, 230, PLAY_H + 70, 14, (Color){ 180, 180, 200, 255 });
@@ -1484,20 +1596,26 @@ int main(void) {
             }
         } else {
             DrawText(status_line, 230, PLAY_H + 30, 22, (Color){ 200, 200, 220, 255 });
-            DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit  [B] sprite browser",
+            DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit  [B] sprite browser  [G] next game",
                      230, PLAY_H + 70, 14, (Color){ 140, 140, 160, 255 });
         }
         if (save_flash > 0) {
             DrawText("saved", SCREEN_W - 100, PLAY_H + 20, 16,
                      (Color){ 120, 255, 160, (unsigned char)(255 * (save_flash / 1.5f)) });
         }
+        if (game_flash > 0) {
+            unsigned char a = (unsigned char)(255 * (game_flash / 2.0f));
+            if (a > 255) a = 255;
+            int tw = MeasureText(game_flash_text, 20);
+            DrawRectangle((SCREEN_W - tw) / 2 - 12, 18, tw + 24, 32, (Color){ 0, 0, 0, (unsigned char)(a * 0.6f) });
+            DrawText(game_flash_text, (SCREEN_W - tw) / 2, 24, 20, (Color){ 255, 240, 120, a });
+        }
 
         EndDrawing();
     }
 
-    UnloadTexture(bg);
+    game_unload(&game);
     for (int i = 0; i < sprite_count; i++) UnloadTexture(sprites[i]);
-    unload_actor_anims(actor_anims);
     CloseWindow();
     return 0;
 }

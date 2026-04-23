@@ -24,11 +24,7 @@ emcc main.c \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s STACK_SIZE=1048576 \
   -s EXPORTED_RUNTIME_METHODS='["UTF8ToString","stringToUTF8","lengthBytesUTF8"]' \
-  --preload-file assets \
-  --preload-file sprites \
+  --preload-file games \
   --preload-file guybrush_sprites_v3 \
-  --preload-file walkbox.txt \
-  --preload-file fg.txt \
-  --preload-file sprites.txt \
   --shell-file web_shell.html \
   -DPLATFORM_WEB

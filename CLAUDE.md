@@ -1,6 +1,6 @@
 # scumm-game
 
-A SCUMM-style point-and-click adventure engine in C + raylib. Single file (`main.c`). The startup room is `rooms/monkey1/` (the Monkey Island 1 dock) and the startup actor is `actors/guybrush/`. Deliberately **not** a SCUMM bytecode VM — no .lfl loader, no interpreter. Just the engine surface.
+A SCUMM-style point-and-click adventure engine in C + raylib. Single file (`main.c`). Each **game** is a self-contained world under `games/<name>/` — its own background, walkboxes, foregrounds, holes, scale config, and actor. The startup game is `games/monkey1/` (the Monkey Island 1 dock, with Guybrush). Deliberately **not** a SCUMM bytecode VM — no .lfl loader, no interpreter. Just the engine surface.
 
 ## Build / run
 
@@ -25,24 +25,25 @@ The `.app` bundle's MacOS stub `cd`s back to the repo root and execs `./scumm-ga
 
 ## Keys (cheat sheet)
 
-- Normal: click verb, click object, click floor to walk. `D` = walkbox/fg overlay. `E` = edit mode. `B` = sprite browser.
+- Normal: click verb, click object, click floor to walk. `D` = walkbox/fg overlay. `E` = edit mode. `B` = sprite browser. `G` = cycle to next game alphabetically (unloads current + spawns in new).
 - In edit mode: `W` walkbox (re-press to cycle), `F` foreground (re-press to cycle), `H` hole/no-walk (re-press to cycle), `K` scale-line editor, `N` new polygon in current mode, `Bksp` delete current polygon, `O` auto-order verts, `R` reset, `S` save, `E` exit (auto-saves). In `K` mode: drag either of the two horizontal lines to move its y, `Up`/`Down` adjust the scale of the line nearest the mouse, `R` resets both lines to the walkbox y-extent.
 - In browser mode: `←/→` prev/next, `↑/↓` ±10, `Home/End`, `0` idle, `1-4` walk down/up/left/right, `5-8` face down/up/left/right, `S` save, `B` exit.
 
 ## Data files (all plain text)
 
-Per-room files live under `rooms/<room>/`, per-actor files under `actors/<actor>/`. Startup uses `rooms/monkey1/` and `actors/guybrush/` (`current_room` / `current_actor` in `main()`).
+Each game lives under `games/<name>/`, fully self-contained. Startup target is set by the first CLI arg or `DEFAULT_GAME` (`monkey1`). Switch games in-play with `[G]` (cycles alphabetically).
 
-- `rooms/<room>/bg.png` — room background image, drawn at `SCREEN_W × PLAY_H`.
-- `rooms/<room>/walkbox.txt` — one `x y` per line, polygons separated by blank lines. Legacy single-polygon files (no blank lines) still parse as one polygon. Loaded and saved via `load_fg_list` / `save_fg_list`.
-- `rooms/<room>/fg.txt` — same format. Each polygon is ear-clipped at render time.
-- `rooms/<room>/holes.txt` — same format. Each polygon carves a no-walk zone out of the walkbox union.
-- `rooms/<room>/scale.txt` — four floats, `y_top s_top\ny_bot s_bot`. Defines the actor perspective scale: linear interpolation of scale vs y between the two reference lines, clamped outside. Missing/invalid = defaults from walkbox y-extent + `s_top=0.2`, `s_bot=1.0`.
-- `actors/<actor>/sprites.txt` — one line per animation: `<name> <frame1> <frame2> ...` where frame numbers index `<actor>_sprites_v3/sprite_NNN.png` (raw frames dir). 9 named slots: `idle`, `walk_{down,up,left,right}`, `face_{down,up,left,right}`.
-- `actors/<actor>/<anim>/NN.png` — exported per-frame PNGs, loaded at runtime by `load_actor_anims`.
-- `guybrush_sprites_v3/` (and similar `<actor>_sprites_v3/`) — raw numbered frames (`sprite_001.png`, …) consumed by the sprite browser (`B`). Currently `SPRITES_DIR` is still hardcoded to `guybrush_sprites_v3`; per-actor raw dirs are TODO.
+- `games/<name>/bg.png` — room background image, drawn at `SCREEN_W × PLAY_H`.
+- `games/<name>/walkbox.txt` — one `x y` per line, polygons separated by blank lines. Legacy single-polygon files (no blank lines) still parse as one polygon. Loaded and saved via `load_fg_list` / `save_fg_list`.
+- `games/<name>/fg.txt` — same format. Each polygon is ear-clipped at render time.
+- `games/<name>/holes.txt` — same format. Each polygon carves a no-walk zone out of the walkbox union.
+- `games/<name>/scale.txt` — four floats, `y_top s_top\ny_bot s_bot`. Defines the actor perspective scale: linear interpolation of scale vs y between the two reference lines, clamped outside. Missing/invalid = defaults from walkbox y-extent + `s_top=0.2`, `s_bot=1.0`.
+- `games/<name>/actor.txt` — one line: the actor directory name (e.g. `guybrush`). Missing file = `DEFAULT_ACTOR`.
+- `games/<name>/actors/<actor>/sprites.txt` — one line per animation: `<name> <frame1> <frame2> ...` where frame numbers index the raw-frames dir (still `guybrush_sprites_v3/` — browser has no per-actor raw-dir support yet). 9 named slots: `idle`, `walk_{down,up,left,right}`, `face_{down,up,left,right}`.
+- `games/<name>/actors/<actor>/<anim>/NN.png` — exported per-frame PNGs, loaded at runtime by `load_actor_anims`.
+- `guybrush_sprites_v3/` — raw numbered frames (`sprite_001.png`, …) consumed by the sprite browser (`B`). `SPRITES_DIR` is hardcoded; per-actor raw dirs are TODO.
 - `player.txt` — truncated on startup, updated every 0.1s while moving. For debugging.
-- `export_sprites.sh [actor]` — bakes `actors/<actor>/sprites.txt` → `actors/<actor>/<anim>/NN.png`. Auto-mirrors `walk_right` → `walk_left` with `sips -f horizontal` (verified: `sips -f horizontal` = left-right mirror on macOS, not top-bottom). Defaults to `guybrush`.
+- `export_sprites.sh [actor]` — bakes `actors/<actor>/sprites.txt` → `actors/<actor>/<anim>/NN.png`. Expects actor dirs at repo root, not inside games/ — this script is a holdover; the engine reads from `games/<name>/actors/<actor>/`. Update when you need to re-export. Auto-mirrors `walk_right` → `walk_left` with `sips -f horizontal`.
 
 ## Working with the user
 
