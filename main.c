@@ -61,18 +61,14 @@ static void web_persist_file(const char *path) {
 #define MAX_FG_POLYS 16
 #define VERT_GRAB_RADIUS 10.0f
 #define EDGE_GRAB_RADIUS 12.0f
-#define WALKBOX_PATH "walkbox.txt"
-#define FG_PATH "fg.txt"
-#define HOLE_PATH "holes.txt"
-#define SCALE_PATH "scale.txt"
+#define ROOMS_DIR  "rooms"
+#define ACTORS_DIR "actors"
 #define PLAYER_POS_PATH "player.txt"
 #define PLAYER_POS_INTERVAL 0.1f
 #define MAX_SPRITES 300
 #define MAX_ANIM_FRAMES 32
 #define ANIM_COUNT 9
 #define SPRITES_DIR "guybrush_sprites_v3"
-#define SPRITES_META_PATH "sprites.txt"
-#define ACTOR_SPRITES_DIR "sprites/guybrush"
 #define ACTOR_ANIM_FPS 8.0f
 #define ACTOR_SPRITE_SCALE 2.5f
 
@@ -738,16 +734,29 @@ int main(void) {
 
     { FILE *pf = fopen(PLAYER_POS_PATH, "w"); if (pf) fclose(pf); }
 
-    Texture2D bg = LoadTexture("assets/bg-dock.png");
+    const char *current_room  = "monkey1";
+    const char *current_actor = "guybrush";
 
-    web_restore_file(WALKBOX_PATH);
-    web_restore_file(FG_PATH);
-    web_restore_file(HOLE_PATH);
-    web_restore_file(SCALE_PATH);
-    web_restore_file(SPRITES_META_PATH);
+    char walkbox_path[128], fg_path[128], hole_path[128], scale_path[128];
+    char bg_path[128], actor_base[128], actor_meta_path[128];
+    snprintf(walkbox_path,    sizeof(walkbox_path),    ROOMS_DIR  "/%s/walkbox.txt", current_room);
+    snprintf(fg_path,         sizeof(fg_path),         ROOMS_DIR  "/%s/fg.txt",      current_room);
+    snprintf(hole_path,       sizeof(hole_path),       ROOMS_DIR  "/%s/holes.txt",   current_room);
+    snprintf(scale_path,      sizeof(scale_path),      ROOMS_DIR  "/%s/scale.txt",   current_room);
+    snprintf(bg_path,         sizeof(bg_path),         ROOMS_DIR  "/%s/bg.png",      current_room);
+    snprintf(actor_base,      sizeof(actor_base),      ACTORS_DIR "/%s",             current_actor);
+    snprintf(actor_meta_path, sizeof(actor_meta_path), ACTORS_DIR "/%s/sprites.txt", current_actor);
+
+    Texture2D bg = LoadTexture(bg_path);
+
+    web_restore_file(walkbox_path);
+    web_restore_file(fg_path);
+    web_restore_file(hole_path);
+    web_restore_file(scale_path);
+    web_restore_file(actor_meta_path);
 
     Walkbox docks[MAX_WB_POLYS] = { 0 };
-    int dock_count = load_fg_list(WALKBOX_PATH, docks, MAX_WB_POLYS);
+    int dock_count = load_fg_list(walkbox_path, docks, MAX_WB_POLYS);
     if (dock_count <= 0) {
         dock_count = 1;
         docks[0] = (Walkbox){
@@ -757,21 +766,21 @@ int main(void) {
     }
 
     Walkbox holes[MAX_WB_POLYS] = { 0 };
-    int hole_count = load_fg_list(HOLE_PATH, holes, MAX_WB_POLYS);
+    int hole_count = load_fg_list(hole_path, holes, MAX_WB_POLYS);
 
     ScaleConfig scale_cfg = default_scale_for_walkboxes(docks, dock_count);
-    load_scale(SCALE_PATH, &scale_cfg);
+    load_scale(scale_path, &scale_cfg);
 
     Walkbox fgs[MAX_FG_POLYS] = { 0 };
-    int fg_count = load_fg_list(FG_PATH, fgs, MAX_FG_POLYS);
+    int fg_count = load_fg_list(fg_path, fgs, MAX_FG_POLYS);
 
     Texture2D sprites[MAX_SPRITES];
     int sprite_count = load_sprites_from_dir(SPRITES_DIR, sprites, MAX_SPRITES);
     Animation anims[ANIM_COUNT];
-    load_anims_from_file(SPRITES_META_PATH, anims);
+    load_anims_from_file(actor_meta_path, anims);
 
     AnimTextures actor_anims[ANIM_COUNT];
-    load_actor_anims(ACTOR_SPRITES_DIR, actor_anims);
+    load_actor_anims(actor_base, actor_anims);
 
     Actor actor = {
         .pos = { SCREEN_W / 2.0f, PLAY_H - 80 },
@@ -844,7 +853,7 @@ int main(void) {
         if (IsKeyPressed(KEY_B) && !edit_mode) {
             browser_mode = !browser_mode;
             if (!browser_mode) {
-                if (save_anims_to_file(SPRITES_META_PATH, anims)) save_flash = 1.5f;
+                if (save_anims_to_file(actor_meta_path, anims)) save_flash = 1.5f;
             }
         }
 
@@ -884,7 +893,7 @@ int main(void) {
                 }
 
                 if (IsKeyPressed(KEY_S)) {
-                    if (save_anims_to_file(SPRITES_META_PATH, anims)) save_flash = 1.5f;
+                    if (save_anims_to_file(actor_meta_path, anims)) save_flash = 1.5f;
                 }
             }
             if (save_flash > 0) save_flash -= dt;
@@ -967,10 +976,10 @@ int main(void) {
             edit_cam.target = (Vector2){ 0, 0 };
             edit_cam.offset = (Vector2){ 0, 0 };
             if (!edit_mode) {
-                bool ok_wb = save_fg_list(WALKBOX_PATH, docks, dock_count);
-                bool ok_fg = save_fg_list(FG_PATH, fgs, fg_count);
-                bool ok_h  = save_fg_list(HOLE_PATH, holes, hole_count);
-                bool ok_s  = save_scale(SCALE_PATH, &scale_cfg);
+                bool ok_wb = save_fg_list(walkbox_path, docks, dock_count);
+                bool ok_fg = save_fg_list(fg_path, fgs, fg_count);
+                bool ok_h  = save_fg_list(hole_path, holes, hole_count);
+                bool ok_s  = save_scale(scale_path, &scale_cfg);
                 if (ok_wb || ok_fg || ok_h || ok_s) save_flash = 1.5f;
                 actor.pos = clamp_to_walkable(actor.pos, docks, dock_count, holes, hole_count);
                 actor.target = actor.pos;
@@ -1065,7 +1074,7 @@ int main(void) {
                 dragging_scale_line = -1;
             }
             if (IsKeyPressed(KEY_S)) {
-                if (save_scale(SCALE_PATH, &scale_cfg)) save_flash = 1.5f;
+                if (save_scale(scale_path, &scale_cfg)) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
                 float d_top = fabsf(mouse.y - scale_cfg.y_top);
@@ -1101,9 +1110,9 @@ int main(void) {
             if (IsKeyPressed(KEY_O)) { sort_poly_by_centroid(active); dragging_vert = -1; }
             if (IsKeyPressed(KEY_S)) {
                 bool ok;
-                if (edit_target == EDIT_FG)        ok = save_fg_list(FG_PATH, fgs, fg_count);
-                else if (edit_target == EDIT_HOLE) ok = save_fg_list(HOLE_PATH, holes, hole_count);
-                else                               ok = save_fg_list(WALKBOX_PATH, docks, dock_count);
+                if (edit_target == EDIT_FG)        ok = save_fg_list(fg_path, fgs, fg_count);
+                else if (edit_target == EDIT_HOLE) ok = save_fg_list(hole_path, holes, hole_count);
+                else                               ok = save_fg_list(walkbox_path, docks, dock_count);
                 if (ok) save_flash = 1.5f;
             }
             if (mouse_screen.y < PLAY_H) {
@@ -1240,7 +1249,7 @@ int main(void) {
             DrawTexturePro(bg, src, dst, (Vector2){ 0, 0 }, 0.0f, WHITE);
         } else {
             DrawRectangle(0, 0, SCREEN_W, PLAY_H, (Color){ 40, 50, 80, 255 });
-            DrawText("(missing assets/bg-dock.png)", 20, 20, 20, RED);
+            DrawText(TextFormat("(missing %s)", bg_path), 20, 20, 20, RED);
         }
 
         float s = actor_scale_at_y(actor.pos.y, &scale_cfg);

@@ -2,9 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SRC="guybrush_sprites_v3"
-DST="sprites/guybrush"
-META="sprites.txt"
+ACTOR="${1:-guybrush}"
+SRC="${ACTOR}_sprites_v3"
+DST="actors/$ACTOR"
+META="$DST/sprites.txt"
+
+# legacy fallback: some older layouts used a flat guybrush_sprites_v3/
+[[ -d "$SRC" ]] || SRC="guybrush_sprites_v3"
 
 if [[ ! -f "$META" ]]; then
     echo "missing $META (save from browser mode first)" >&2
