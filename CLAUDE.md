@@ -25,7 +25,7 @@ The `.app` bundle's MacOS stub `cd`s back to the repo root and execs `./scumm-ga
 
 ## Keys (cheat sheet)
 
-- Normal: click verb, click object, click floor to walk. `D` = walkbox/fg overlay. `E` = edit mode. `B` = sprite browser. `G` = cycle to next game alphabetically (unloads current + spawns in new).
+- Normal: click verb, click object, click floor to walk. `D` = walkbox/fg overlay. `E` = edit mode. `B` = sprite browser. `G` = open games menu (keyboard Up/Down + Enter, or mouse click, to pick a game; Esc or `G` to cancel).
 - In edit mode: `W` walkbox (re-press to cycle), `F` foreground (re-press to cycle), `H` hole/no-walk (re-press to cycle), `K` scale-line editor, `N` new polygon in current mode, `Bksp` delete current polygon, `O` auto-order verts, `R` reset, `S` save, `E` exit (auto-saves). In `K` mode: drag either of the two horizontal lines to move its y, `Up`/`Down` adjust the scale of the line nearest the mouse, `R` resets both lines to the walkbox y-extent.
 - In browser mode: `←/→` prev/next, `↑/↓` ±10, `Home/End`, `0` idle, `1-4` walk down/up/left/right, `5-8` face down/up/left/right, `S` save, `B` exit.
 

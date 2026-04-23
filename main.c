@@ -881,6 +881,9 @@ int main(int argc, char **argv) {
     char game_flash_text[96] = "";
     float game_flash = 0.0f;
     char game_names[MAX_GAMES][64];
+    bool game_menu = false;
+    int  game_menu_idx = 0;
+    int  game_menu_count = 0;
 
     Verb selected_verb = VERB_LOOK;
     char message[256] = "";
@@ -1055,6 +1058,95 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (game_menu) {
+            bool should_select = false;
+            if (game_menu_count > 0) {
+                if (IsKeyPressed(KEY_UP)   || IsKeyPressedRepeat(KEY_UP))
+                    game_menu_idx = (game_menu_idx - 1 + game_menu_count) % game_menu_count;
+                if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN))
+                    game_menu_idx = (game_menu_idx + 1) % game_menu_count;
+                if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
+                    should_select = true;
+            }
+            if (IsKeyPressed(KEY_ESCAPE)) {
+                game_menu = false;
+            }
+
+            int row_h = 36;
+            int total_h = game_menu_count * row_h;
+            int start_y = (SCREEN_H - total_h) / 2;
+            int row_w = 520;
+            int row_x = (SCREEN_W - row_w) / 2;
+
+            for (int i = 0; i < game_menu_count; i++) {
+                Rectangle row = { (float)row_x, (float)(start_y + i * row_h - 4),
+                                  (float)row_w, (float)(row_h - 4) };
+                if (CheckCollisionPointRec(mouse_screen, row)) {
+                    game_menu_idx = i;
+                    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) should_select = true;
+                }
+            }
+
+            if (should_select && game_menu_count > 0) {
+                const char *selected = game_names[game_menu_idx];
+                if (strcmp(selected, game.name) != 0) {
+                    char chosen[64];
+                    snprintf(chosen, sizeof(chosen), "%s", selected);
+                    game_unload(&game);
+                    game_load(&game, chosen);
+                    load_anims_from_file(game.actor_meta_path, anims);
+                    actor.pos = (Vector2){ SCREEN_W / 2.0f, PLAY_H - 80 };
+                    actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count,
+                                                  game.holes, game.hole_count);
+                    actor.target = actor.pos;
+                    actor.moving = false;
+                    actor.waypoint_count = 0;
+                    snprintf(game_flash_text, sizeof(game_flash_text),
+                             "Now playing: %s  (actor: %s)", game.name, game.actor_name);
+                    game_flash = 2.0f;
+                }
+                game_menu = false;
+            }
+
+            BeginDrawing();
+            ClearBackground((Color){ 15, 12, 28, 255 });
+
+            const char *title = "SELECT GAME";
+            int tw = MeasureText(title, 32);
+            DrawText(title, (SCREEN_W - tw) / 2, 60, 32, (Color){ 255, 220, 120, 255 });
+
+            for (int i = 0; i < game_menu_count; i++) {
+                int y = start_y + i * row_h;
+                bool is_sel = (i == game_menu_idx);
+                bool is_cur = (strcmp(game_names[i], game.name) == 0);
+                if (is_sel) {
+                    DrawRectangle(row_x, y - 4, row_w, row_h - 4, (Color){ 60, 50, 20, 200 });
+                    DrawRectangleLines(row_x, y - 4, row_w, row_h - 4, (Color){ 255, 220, 120, 220 });
+                }
+                char line[96];
+                snprintf(line, sizeof(line), "%s%s",
+                         game_names[i], is_cur ? "   (current)" : "");
+                Color c = is_sel ? (Color){ 255, 240, 140, 255 }
+                                 : (is_cur ? (Color){ 180, 200, 255, 255 }
+                                           : (Color){ 220, 220, 230, 255 });
+                DrawText(line, row_x + 24, y, 22, c);
+            }
+
+            if (game_menu_count == 0) {
+                const char *empty = "(no game folders found in games/)";
+                int ew = MeasureText(empty, 18);
+                DrawText(empty, (SCREEN_W - ew) / 2, SCREEN_H / 2, 18, (Color){ 200, 200, 210, 200 });
+            }
+
+            const char *footer = "[Up/Down] navigate   [Enter/click] select   [Esc] cancel";
+            int fw = MeasureText(footer, 14);
+            DrawText(footer, (SCREEN_W - fw) / 2, SCREEN_H - 36, 14,
+                     (Color){ 160, 160, 180, 220 });
+
+            EndDrawing();
+            continue;
+        }
+
         if (IsKeyPressed(KEY_D)) debug_overlay = !debug_overlay;
         if (IsKeyPressed(KEY_E)) {
             edit_mode = !edit_mode;
@@ -1107,29 +1199,11 @@ int main(int argc, char **argv) {
             dragging_scale_line = -1;
             edit_target = EDIT_SCALE;
         }
-        if (!edit_mode && !browser_mode && IsKeyPressed(KEY_G)) {
-            int gn = game_list(game_names, MAX_GAMES);
-            if (gn > 1) {
-                int cur = game_find_index(game_names, gn, game.name);
-                int next = (cur < 0) ? 0 : (cur + 1) % gn;
-                char next_name[64];
-                snprintf(next_name, sizeof(next_name), "%s", game_names[next]);
-                game_unload(&game);
-                game_load(&game, next_name);
-                load_anims_from_file(game.actor_meta_path, anims);
-                actor.pos = (Vector2){ SCREEN_W / 2.0f, PLAY_H - 80 };
-                actor.pos = clamp_to_walkable(actor.pos, game.docks, game.dock_count,
-                                              game.holes, game.hole_count);
-                actor.target = actor.pos;
-                actor.moving = false;
-                actor.waypoint_count = 0;
-                snprintf(game_flash_text, sizeof(game_flash_text),
-                         "Now playing: %s  (actor: %s)", game.name, game.actor_name);
-                game_flash = 2.0f;
-            } else {
-                snprintf(game_flash_text, sizeof(game_flash_text), "Only one game: %s", game.name);
-                game_flash = 1.5f;
-            }
+        if (!edit_mode && !browser_mode && !game_menu && IsKeyPressed(KEY_G)) {
+            game_menu_count = game_list(game_names, MAX_GAMES);
+            int cur = game_find_index(game_names, game_menu_count, game.name);
+            game_menu_idx = (cur < 0) ? 0 : cur;
+            game_menu = true;
         }
         if (edit_mode && IsKeyPressed(KEY_N)) {
             if (edit_target == EDIT_FG && game.fg_count < MAX_FG_POLYS) {
@@ -1596,7 +1670,7 @@ int main(int argc, char **argv) {
             }
         } else {
             DrawText(status_line, 230, PLAY_H + 30, 22, (Color){ 200, 200, 220, 255 });
-            DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit  [B] sprite browser  [G] next game",
+            DrawText("Click a verb, click an object, click floor to walk.  [D] overlay  [E] edit  [B] sprite browser  [G] games",
                      230, PLAY_H + 70, 14, (Color){ 140, 140, 160, 255 });
         }
         if (save_flash > 0) {
