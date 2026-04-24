@@ -14,7 +14,7 @@ if [[ ! -f "$RAYLIB_SRC/libraylib.a" ]]; then
 fi
 
 mkdir -p docs
-emcc main.c \
+emcc src/main.c \
   -o docs/index.html \
   -I "$RAYLIB_SRC" \
   "$RAYLIB_SRC/libraylib.a" \

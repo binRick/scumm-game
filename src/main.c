@@ -696,12 +696,16 @@ static const char *verb_names[VERB_COUNT] = { "Look at", "Use", "Pick up", "Give
 
 typedef struct {
     Rectangle rect;
-    const char *name;
-    const char *look_text;
-    const char *use_text;
-    const char *pickup_text;
+    char name[64];
+    char look_text[160];
+    char use_text[160];
+    char pickup_text[160];
+    char give_text[160];
     bool visible;
+    bool tipped;
 } Hotspot;
+
+#define MAX_HOTSPOTS 32
 
 typedef struct {
     char name[64];
@@ -782,10 +786,58 @@ typedef struct {
     char actor_decl_path[160];
     char layout_path[160];
     char inventory_path[160];
+    char hotspots_path[160];
 
     char inventory[MAX_INVENTORY][64];
     int  inventory_count;
+
+    Hotspot hotspots[MAX_HOTSPOTS];
+    int     hotspot_count;
 } Game;
+
+static void copy_trimmed(const char *src, char *dst, size_t cap) {
+    while (*src == ' ' || *src == '\t') src++;
+    snprintf(dst, cap, "%s", src);
+    size_t n = strlen(dst);
+    while (n > 0 && (dst[n - 1] == ' ' || dst[n - 1] == '\t' ||
+                     dst[n - 1] == '\n' || dst[n - 1] == '\r')) dst[--n] = 0;
+}
+
+static int load_hotspots(const char *path, Hotspot *out, int max_hotspots) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int n = 0;
+    char line[640];
+    while (n < max_hotspots && fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\n' || *p == '\0' || *p == '#') continue;
+        char *fields[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+        int fc = 0;
+        fields[fc++] = p;
+        for (char *q = p; *q; q++) {
+            if (*q == '|' && fc < 6) {
+                *q = 0;
+                fields[fc++] = q + 1;
+            }
+        }
+        if (fc < 2) continue;
+        Hotspot *h = &out[n];
+        *h = (Hotspot){ 0 };
+        h->visible = true;
+        copy_trimmed(fields[0], h->name, sizeof(h->name));
+        float x = 0, y = 0, w = 0, hgt = 0;
+        if (sscanf(fields[1], "%f %f %f %f", &x, &y, &w, &hgt) < 4) continue;
+        h->rect = (Rectangle){ x, y, w, hgt };
+        if (fc > 2) copy_trimmed(fields[2], h->look_text,   sizeof(h->look_text));
+        if (fc > 3) copy_trimmed(fields[3], h->use_text,    sizeof(h->use_text));
+        if (fc > 4) copy_trimmed(fields[4], h->give_text,   sizeof(h->give_text));
+        if (fc > 5) copy_trimmed(fields[5], h->pickup_text, sizeof(h->pickup_text));
+        n++;
+    }
+    fclose(f);
+    return n;
+}
 
 static int load_inventory(const char *path, char items[][64], int max_items) {
     FILE *f = fopen(path, "r");
@@ -828,6 +880,7 @@ static void game_build_paths(Game *g) {
     snprintf(g->actor_decl_path, sizeof(g->actor_decl_path), GAMES_DIR "/%s/actor.txt",   g->name);
     snprintf(g->layout_path,     sizeof(g->layout_path),     GAMES_DIR "/%s/layout.txt",  g->name);
     snprintf(g->inventory_path,  sizeof(g->inventory_path),  GAMES_DIR "/%s/inventory.txt", g->name);
+    snprintf(g->hotspots_path,   sizeof(g->hotspots_path),   GAMES_DIR "/%s/hotspots.txt",  g->name);
     snprintf(g->actor_base,      sizeof(g->actor_base),      GAMES_DIR "/%s/actors/%s",   g->name, g->actor_name);
     snprintf(g->actor_meta_path, sizeof(g->actor_meta_path), GAMES_DIR "/%s/actors/%s/sprites.txt",
              g->name, g->actor_name);
@@ -913,6 +966,7 @@ static void game_load(Game *g, const char *name) {
     load_scale(g->scale_path, &g->scale_cfg);
 
     g->inventory_count = load_inventory(g->inventory_path, g->inventory, MAX_INVENTORY);
+    g->hotspot_count = load_hotspots(g->hotspots_path, g->hotspots, MAX_HOTSPOTS);
 
     g->actor_count = 0;
     Vector2 player_spawn = { SCREEN_W / 2.0f, PLAY_H - 80 };
@@ -945,6 +999,12 @@ static void game_load(Game *g, const char *name) {
             for (int i = 1; i < g->actor_count; i++) {
                 g->actors[i].pos.x *= sx;
                 g->actors[i].pos.y *= sy;
+            }
+            for (int i = 0; i < g->hotspot_count; i++) {
+                g->hotspots[i].rect.x      *= sx;
+                g->hotspots[i].rect.y      *= sy;
+                g->hotspots[i].rect.width  *= sx;
+                g->hotspots[i].rect.height *= sy;
             }
         }
     }
@@ -1443,6 +1503,13 @@ int main(int argc, char **argv) {
         }
 
         Hotspot *hover = NULL;
+        if (!edit_mode && mouse_screen.y < PLAY_H) {
+            for (int i = 0; i < game.hotspot_count; i++) {
+                Hotspot *h = &game.hotspots[i];
+                if (!h->visible) continue;
+                if (CheckCollisionPointRec(mouse, h->rect)) { hover = h; break; }
+            }
+        }
 
         if (hover) {
             snprintf(status_line, sizeof(status_line), "%s %s", verb_names[selected_verb], hover->name);
@@ -1650,9 +1717,26 @@ int main(int argc, char **argv) {
                                     case VERB_LOOK:   txt = h->look_text; break;
                                     case VERB_USE:    txt = h->use_text; break;
                                     case VERB_PICKUP: txt = h->pickup_text; break;
+                                    case VERB_GIVE: {
+                                        int bill = -1;
+                                        for (int k = 0; k < game.inventory_count; k++) {
+                                            if (strcmp(game.inventory[k], "$100 bill") == 0) { bill = k; break; }
+                                        }
+                                        if (bill < 0) {
+                                            txt = "I have nothing to give.";
+                                        } else {
+                                            for (int k = bill; k < game.inventory_count - 1; k++) {
+                                                snprintf(game.inventory[k], 64, "%s", game.inventory[k + 1]);
+                                            }
+                                            game.inventory_count--;
+                                            h->tipped = true;
+                                            txt = h->give_text[0] ? h->give_text : "Tipped.";
+                                        }
+                                        break;
+                                    }
                                     default: break;
                                 }
-                                if (txt) {
+                                if (txt && txt[0]) {
                                     strncpy(message, txt, sizeof(message) - 1);
                                     message[sizeof(message) - 1] = '\0';
                                     message_timer = MESSAGE_TIME;
@@ -1720,6 +1804,16 @@ int main(int argc, char **argv) {
             for (int i = 0; i < game.fg_count; i++) {
                 draw_fg_debug_fill(&game.fgs[i], (Color){ 255, 0, 255, 90 });
             }
+            for (int i = 0; i < game.hotspot_count; i++) {
+                Hotspot *h = &game.hotspots[i];
+                Color c = h->tipped ? (Color){ 100, 255, 160, 200 } : (Color){ 255, 240, 120, 200 };
+                DrawRectangleLinesEx(h->rect, 2, c);
+                DrawText(h->name, (int)h->rect.x + 4, (int)h->rect.y - 16, 14, c);
+            }
+        }
+        if (!edit_mode && hover) {
+            Color c = hover->tipped ? (Color){ 120, 255, 160, 230 } : (Color){ 255, 240, 120, 230 };
+            DrawRectangleLinesEx(hover->rect, 2, c);
         }
 
         if (debug_overlay || edit_mode) {

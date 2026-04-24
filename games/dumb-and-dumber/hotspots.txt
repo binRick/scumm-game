@@ -1,0 +1,4 @@
+# name | x y w h | look | use | give | pickup
+Butler (left)  | 305 388 40 60 | A sharp-dressed butler standing by the limo.   | He's waiting on his tip.  | "Much obliged, sir!" *pockets the bill*          | I can't just pocket a butler.
+Butler (right) | 493 388 40 60 | Another butler in uniform by the other door.   | He's eyeing me expectantly. | "Thank you very kindly!" *tips his hat*         | He's not that kind of item.
+Doorman        | 457 304 40 60 | The doorman at the front entrance.             | He opens the door for me.   | "Very generous, sir. Good evening." *bows*     | He wouldn't appreciate that.
